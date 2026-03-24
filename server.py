@@ -7,8 +7,9 @@ import httpx
 from datetime import datetime, timedelta
 from typing import Optional
 from fastmcp import FastMCP
+from fastapi import FastAPI
+import uvicorn
 
-# stateless_http is now set via FASTMCP_STATELESS_HTTP env var
 mcp = FastMCP("TN360 Fleet Server")
 
 TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
@@ -30,6 +31,7 @@ async def _get(path: str, params: dict | None = None) -> dict | list:
         r.raise_for_status()
         return r.json()
 
+# --- All your tools stay exactly the same ---
 @mcp.tool()
 async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
     """List all vehicles in the TN360 account."""
@@ -91,13 +93,22 @@ async def get_vehicle_odometer(vehicle_id: int) -> dict:
     """Get the current odometer reading for a vehicle."""
     return await _get(f"/vehicles/{vehicle_id}/odometer")
 
+# ── App setup ─────────────────────────────────────────────────────────────────
+
+# Get the FastAPI app from FastMCP and add /health to it
+app = mcp.get_asgi_app()  # returns a Starlette/FastAPI-compatible app
+
+# Wrap in FastAPI so we can add routes
+api = FastAPI()
+
+@api.get("/health")
+def health():
+    return {"status": "ok"}
+
+# Mount MCP at /mcp
+api.mount("/mcp", app)
+
 # ── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    mcp.run(
-        transport="streamable-http",
-        host="0.0.0.0",
-        port=port,
-        path="/mcp",
-    )
-    
+    uvicorn.run(api, host="0.0.0.0", port=port)
