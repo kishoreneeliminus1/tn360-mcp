@@ -105,7 +105,13 @@ app = Starlette(routes=[
 ])
 
 # ── Run ───────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    print(f"Starting on port {port}", flush=True)
-    uvicorn.run(app, host="0.0.0.0", port=port)
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.responses import JSONResponse
+
+async def health(request):
+    return JSONResponse({"status": "ok"})
+
+app = Starlette(routes=[
+    Route("/health", health),
+])
