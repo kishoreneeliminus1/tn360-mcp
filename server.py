@@ -94,21 +94,22 @@ async def get_vehicle_odometer(vehicle_id: int) -> dict:
     return await _get(f"/vehicles/{vehicle_id}/odometer")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
+from starlette.responses import JSONResponse
 
-# Get the FastAPI app from FastMCP and add /health to it
-app = mcp.get_asgi_app()  # returns a Starlette/FastAPI-compatible app
+async def health(request):
+    return JSONResponse({"status": "ok"})
 
-# Wrap in FastAPI so we can add routes
-api = FastAPI()
+# http_app() is the correct FastMCP 2.x method
+mcp_app = mcp.http_app(path="/mcp")
 
-@api.get("/health")
-def health():
-    return {"status": "ok"}
-
-# Mount MCP at /mcp
-api.mount("/mcp", app)
+app = Starlette(routes=[
+    Route("/health", health),
+    Mount("/", app=mcp_app),
+])
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(api, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
