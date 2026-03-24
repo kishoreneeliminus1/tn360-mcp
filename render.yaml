@@ -11,5 +11,5 @@ services:
       - key: TN360_BASE_URL
         value: https://api-au.telematics.com
       - key: PORT
-        value: "8000"
+        value: os.environ.get("PORT", 8000)
     autoDeploy: true
