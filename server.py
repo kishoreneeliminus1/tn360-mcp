@@ -98,7 +98,7 @@ async def get_vehicle_odometer(vehicle_id: int) -> dict:
 async def health(request):
     return JSONResponse({"status": "ok"})
 
-mcp_app = mcp.http_app(path="/mcp")
+mcp_app = mcp.http_app(path="/")
 
 app = Starlette(routes=[
     Route("/health", health),
