@@ -9,6 +9,4 @@ services:
         sync: false          # Set this secret in the Render dashboard
       - key: TN360_BASE_URL
         value: https://api-au.telematics.com
-      - key: PORT
-        value: os.environ.get("PORT", 8000)
     autoDeploy: true
