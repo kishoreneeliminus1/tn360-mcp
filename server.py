@@ -100,8 +100,3 @@ if __name__ == "__main__":
         port=port,
         path="/mcp",
     )
-```
-
-Then in your **Render dashboard → Environment**, add:
-```
-FASTMCP_STATELESS_HTTP=true
