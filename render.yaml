@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: tn360-mcp-server
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    healthCheckPath: /health
+    envVars:
+      - key: TN360_API_KEY
+        sync: false          # Set this secret in the Render dashboard
+      - key: TN360_BASE_URL
+        value: https://api-au.telematics.com
+      - key: PORT
+        value: "8000"
+    autoDeploy: true
