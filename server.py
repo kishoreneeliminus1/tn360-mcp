@@ -1,17 +1,14 @@
 """
 TN360 MCP Server
 Exposes Teletrac Navman TN360 fleet telematics data to Claude via MCP.
-Deploy on Render using Streamable HTTP transport.
 """
 
 import os
-import uvicorn
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
 from fastmcp import FastMCP
 
-# ── Server setup ──────────────────────────────────────────────────────────────
 mcp = FastMCP(
     "TN360 Fleet Server",
     stateless_http=True,
@@ -40,8 +37,6 @@ async def _get(path: str, params: dict | None = None) -> dict | list:
         return r.json()
 
 
-# ── Tools ─────────────────────────────────────────────────────────────────────
-
 @mcp.tool()
 async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
     """List all vehicles in the TN360 account."""
@@ -55,8 +50,7 @@ async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
 @mcp.tool()
 async def get_vehicle_location(vehicle_id: int) -> dict:
     """Get the current GPS location and status of a specific vehicle."""
-    data = await _get(f"/vehicles/{vehicle_id}/position")
-    return data
+    return await _get(f"/vehicles/{vehicle_id}/position")
 
 
 @mcp.tool()
@@ -79,8 +73,7 @@ async def get_events(
 @mcp.tool()
 async def get_fleets() -> dict:
     """List all virtual fleet groups in the TN360 account."""
-    data = await _get("/fleets")
-    return {"fleets": data}
+    return await _get("/fleets")
 
 
 @mcp.tool()
@@ -104,20 +97,22 @@ async def get_trips(vehicle_id: int, days_back: int = 7) -> dict:
 @mcp.tool()
 async def get_geofences() -> dict:
     """List all geofences configured in the TN360 account."""
-    data = await _get("/geofences")
-    return {"geofences": data}
+    return await _get("/geofences")
 
 
 @mcp.tool()
 async def get_vehicle_odometer(vehicle_id: int) -> dict:
     """Get the current odometer reading for a vehicle."""
-    data = await _get(f"/vehicles/{vehicle_id}/odometer")
-    return data
+    return await _get(f"/vehicles/{vehicle_id}/odometer")
 
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    app = mcp.http_app(path="/mcp")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    mcp.run(
+        transport="streamable-http",
+        host="0.0.0.0",
+        port=port,
+        path="/mcp",
+    )
