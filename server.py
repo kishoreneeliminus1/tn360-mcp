@@ -8,6 +8,9 @@ from datetime import datetime, timedelta
 from typing import Optional
 from fastmcp import FastMCP
 from fastapi import FastAPI
+from starlette.applications import Starlette
+from starlette.routing import Route, Mount
+from starlette.responses import JSONResponse
 import uvicorn
 
 mcp = FastMCP("TN360 Fleet Server")
@@ -31,7 +34,6 @@ async def _get(path: str, params: dict | None = None) -> dict | list:
         r.raise_for_status()
         return r.json()
 
-# --- All your tools stay exactly the same ---
 @mcp.tool()
 async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
     """List all vehicles in the TN360 account."""
@@ -94,19 +96,12 @@ async def get_vehicle_odometer(vehicle_id: int) -> dict:
     return await _get(f"/vehicles/{vehicle_id}/odometer")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
-from starlette.applications import Starlette
-from starlette.routing import Route, Mount
-from starlette.responses import JSONResponse
 
 async def health(request):
     return JSONResponse({"status": "ok"})
 
-# http_app() is the correct FastMCP 2.x method
-mcp_app = mcp.http_app(path="/mcp")
-
 app = Starlette(routes=[
     Route("/health", health),
-    Mount("/", app=mcp_app),
 ])
 
 # ── Run ───────────────────────────────────────────────────────────────────────
