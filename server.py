@@ -2,22 +2,17 @@
 TN360 MCP Server
 Exposes Teletrac Navman TN360 fleet telematics data to Claude via MCP.
 """
-
 import os
 import httpx
 from datetime import datetime, timedelta
 from typing import Optional
 from fastmcp import FastMCP
 
-mcp = FastMCP(
-    "TN360 Fleet Server",
-    stateless_http=True,
-    json_response=True,
-)
+# stateless_http is now set via FASTMCP_STATELESS_HTTP env var
+mcp = FastMCP("TN360 Fleet Server")
 
 TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
 TN360_API_KEY  = os.environ.get("TN360_API_KEY", "")
-
 
 def _headers() -> dict:
     if not TN360_API_KEY:
@@ -28,14 +23,12 @@ def _headers() -> dict:
         "Content-Type": "application/json",
     }
 
-
 async def _get(path: str, params: dict | None = None) -> dict | list:
     url = f"{TN360_BASE_URL}/v1{path}"
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(url, headers=_headers(), params=params or {})
         r.raise_for_status()
         return r.json()
-
 
 @mcp.tool()
 async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
@@ -46,12 +39,10 @@ async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
     data = await _get("/vehicles", params)
     return {"vehicles": data, "count": len(data) if isinstance(data, list) else None}
 
-
 @mcp.tool()
 async def get_vehicle_location(vehicle_id: int) -> dict:
     """Get the current GPS location and status of a specific vehicle."""
     return await _get(f"/vehicles/{vehicle_id}/position")
-
 
 @mcp.tool()
 async def get_events(
@@ -69,12 +60,10 @@ async def get_events(
     data = await _get("/events", params)
     return {"events": data, "count": len(data) if isinstance(data, list) else None}
 
-
 @mcp.tool()
 async def get_fleets() -> dict:
     """List all virtual fleet groups in the TN360 account."""
     return await _get("/fleets")
-
 
 @mcp.tool()
 async def get_drivers(status: str = "active") -> dict:
@@ -82,7 +71,6 @@ async def get_drivers(status: str = "active") -> dict:
     params = {} if status == "all" else {"status": status}
     data = await _get("/drivers", params)
     return {"drivers": data, "count": len(data) if isinstance(data, list) else None}
-
 
 @mcp.tool()
 async def get_trips(vehicle_id: int, days_back: int = 7) -> dict:
@@ -93,21 +81,17 @@ async def get_trips(vehicle_id: int, days_back: int = 7) -> dict:
     data    = await _get(f"/vehicles/{vehicle_id}/trips", {"from": from_dt, "to": to_dt})
     return {"trips": data, "vehicle_id": vehicle_id}
 
-
 @mcp.tool()
 async def get_geofences() -> dict:
     """List all geofences configured in the TN360 account."""
     return await _get("/geofences")
-
 
 @mcp.tool()
 async def get_vehicle_odometer(vehicle_id: int) -> dict:
     """Get the current odometer reading for a vehicle."""
     return await _get(f"/vehicles/{vehicle_id}/odometer")
 
-
 # ── Run ───────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     mcp.run(
@@ -116,4 +100,8 @@ if __name__ == "__main__":
         port=port,
         path="/mcp",
     )
-    
+```
+
+Then in your **Render dashboard → Environment**, add:
+```
+FASTMCP_STATELESS_HTTP=true
