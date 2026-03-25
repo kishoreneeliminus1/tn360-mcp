@@ -16,7 +16,6 @@ mcp = FastMCP("TN360 Fleet Server")
 TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
 TN360_API_KEY  = os.environ.get("TN360_API_KEY", "")
 
-
 def _headers() -> dict:
     if not TN360_API_KEY:
         raise RuntimeError("TN360_API_KEY environment variable is not set.")
