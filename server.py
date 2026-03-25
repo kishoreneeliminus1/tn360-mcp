@@ -100,8 +100,10 @@ async def health(request):
 
 mcp_app = mcp.http_app(path="/")
 
-app = Starlette(routes=[
+app = Starlette(
     lifespan=mcp_app.lifespan,
-    Route("/health", health),
-    Mount("/mcp", app=mcp_app),
-])
+    routes=[
+        Route("/health", health),
+        Mount("/mcp", app=mcp_app),
+    ],
+)
