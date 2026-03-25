@@ -69,7 +69,7 @@ async def get_events(
     to_dt   = now.isoformat().replace("+00:00", "Z")
 
     params: dict = {
-        "types": event_types,
+        "types": "alarm,alert,camera,communication,driver,engine_management,fatigue,form,geofence,gpio,ignition,installation,job,mass,movement,position,pretrip,pto,runsheet,speed,summary,trip,vpm",
         "from": from_dt,
         "to": to_dt
     }
