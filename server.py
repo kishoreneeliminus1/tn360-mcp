@@ -58,36 +58,7 @@ async def get_vehicle_location(vehicle_id: int) -> dict:
 
 @mcp.tool()
 async def get_events(
-    event_types: str = (        
-    "ignition,"
-    "movement,"
-    "position,"
-    "speed,"
-    "trip,"
-    "summary,"
-    "harshBraking,"
-    "harshAcceleration,"
-    "harshCornering,"
-    "overRevving,"
-    "driverFatigue,"
-    "driverDistraction,"
-    "seatbeltViolation,"
-    "pto,"
-    "pretrip,"
-    "mass,"
-    "gpio,"
-    "installation,"
-    "engine_management,"
-    "communication,"
-    "geofence,"
-    "camera,"
-    "vpm,"
-    "job,"
-    "runsheet,"
-    "alarm,"
-    "alert,"
-    "form"
-    ),
+    event_types: str = "alarm,alert,camera,communication,driver,engine_management,fatigue,form,geofence,gpio,ignition,installation,job,mass,movement,position,pretrip,pto,runsheet,speed,summary,trip,vpm",
     hours_back: int = 24,
     vehicle_id: Optional[int] = None,
 ) -> dict:
