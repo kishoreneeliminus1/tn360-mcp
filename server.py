@@ -13,7 +13,7 @@ from starlette.responses import JSONResponse
 
 mcp = FastMCP("TN360 Fleet Server")
 
-TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com/v1")
+TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
 TN360_API_KEY  = os.environ.get("TN360_API_KEY", "")
 
 def _headers() -> dict:
@@ -38,13 +38,13 @@ async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
     params = {}
     if fleet_id:
         params["fleetId"] = fleet_id
-    data = await _get("/vehicles", params)
+    data = await _get("/v1/vehicles", params)
     return {"vehicles": data, "count": len(data) if isinstance(data, list) else None}
 
 @mcp.tool()
 async def get_vehicle_location(vehicle_id: int) -> dict:
     """Get the current GPS location and status of a specific vehicle."""
-    return await _get(f"/vehicles/{vehicle_id}/position")
+    return await _get(f"/v1/vehicles/{vehicle_id}/position")
 
 @mcp.tool()
 async def get_events(
@@ -59,19 +59,19 @@ async def get_events(
     params: dict = {"types": event_types, "from": from_dt, "to": to_dt}
     if vehicle_id:
         params["vehicleId"] = vehicle_id
-    data = await _get("/events", params)
+    data = await _get("/v1/events", params)
     return {"events": data, "count": len(data) if isinstance(data, list) else None}
 
 @mcp.tool()
 async def get_fleets() -> dict:
     """List all virtual fleet groups in the TN360 account."""
-    return await _get("/fleets")
+    return await _get("/v1/fleets")
 
 @mcp.tool()
 async def get_drivers(status: str = "active") -> dict:
     """List drivers registered in the TN360 platform."""
     params = {} if status == "all" else {"status": status}
-    data = await _get("/drivers", params)
+    data = await _get("/v1/drivers", params)
     return {"drivers": data, "count": len(data) if isinstance(data, list) else None}
 
 @mcp.tool()
@@ -86,12 +86,12 @@ async def get_trips(vehicle_id: int, days_back: int = 7) -> dict:
 @mcp.tool()
 async def get_geofences() -> dict:
     """List all geofences configured in the TN360 account."""
-    return await _get("/geofences")
+    return await _get("/v1/geofences")
 
 @mcp.tool()
 async def get_vehicle_odometer(vehicle_id: int) -> dict:
     """Get the current odometer reading for a vehicle."""
-    return await _get(f"/vehicles/{vehicle_id}/odometer")
+    return await _get(f"/v1/vehicles/{vehicle_id}/odometer")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 
