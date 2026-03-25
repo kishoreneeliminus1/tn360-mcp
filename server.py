@@ -104,6 +104,6 @@ app = Starlette(
     lifespan=mcp_app.lifespan,
     routes=[
         Route("/health", health),
-        Mount("/mcp/", app=mcp_app),
+        Mount("/mcp", app=mcp_app),
     ],
 )
