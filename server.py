@@ -25,7 +25,6 @@ def _headers() -> dict:
         "Content-Type": "application/json",
     }
 
-
 async def _get(path: str, params: dict | None = None) -> dict | list:
     url = f"{TN360_BASE_URL}/v1{path}"
     async with httpx.AsyncClient(timeout=15) as client:
