@@ -69,9 +69,10 @@ async def get_events(
     to_dt   = now.isoformat().replace("+00:00", "Z")
 
     params: dict = {
-        "types": "camera,DRIVER,fatigue,form,geofence,gpio,ignition,installation,job,mass,movement,position,pretrip,pto,runsheet,speed,summary,trip,vpm",
+        "types": "camera,DRIVER,fatigue,geofence,gpio,ignition,pretrip,pto,runsheet,speed,summary,trip,vpm",
         "from": from_dt,
-        "to": to_dt
+        "to": to_dt,
+        "pruning": "ALL"
     }
     
     if vehicle_id:
