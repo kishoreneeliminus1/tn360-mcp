@@ -58,20 +58,37 @@ async def get_vehicle_location(vehicle_id: int) -> dict:
 
 @mcp.tool()
 async def get_events(
-    event_types: str = "ignition,speeding,harsh_braking",
+    event_types: str = (
+        "alarm,alert,camera,communication,driver,engine_management,"
+        "fatigue,form,geofence,gpio,ignition,installation,job,mass,"
+        "movement,position,pretrip,pto,runsheet,speed,summary,trip,vpm"
+    ),
     hours_back: int = 24,
     vehicle_id: Optional[int] = None,
 ) -> dict:
-    """Retrieve fleet events for a time window."""
-    hours_back = min(hours_back, 168)
+    """Retrieve fleet events with full ISO8601 date+time window."""
+    
+    hours_back = min(hours_back, 168)  # safety cap: 7 days
+    
     now = datetime.now(timezone.utc)
-    from_dt = (now - timedelta(hours=hours_back)).strftime("%Y-%m-%d")
-    to_dt   = now.strftime("%Y-%m-%d")
-    params: dict = {"types": event_types, "from": from_dt, "to": to_dt}
+    from_dt = (now - timedelta(hours=hours_back)).isoformat().replace("+00:00", "Z")
+    to_dt   = now.isoformat().replace("+00:00", "Z")
+
+    params: dict = {
+        "types": event_types,
+        "from": from_dt,
+        "to": to_dt
+    }
+    
     if vehicle_id:
-        params["vehicleId"] = vehicle_id
+        params["vehicleId"] = vehicle_id   # keep same key unless API requires plural
+    
     data = await _get("/events", params)
-    return {"events": data, "count": len(data) if isinstance(data, list) else None}
+
+    return {
+        "events": data,
+        "count": len(data) if isinstance(data, list) else None
+    }
 
 
 @mcp.tool()
