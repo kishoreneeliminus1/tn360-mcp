@@ -102,6 +102,7 @@ mcp_app = mcp.http_app(path="/")
 
 app = Starlette(
     lifespan=mcp_app.lifespan,
+    redirect_slashes=False, 
     routes=[
         Route("/health", health),
         Mount("/mcp", app=mcp_app),
