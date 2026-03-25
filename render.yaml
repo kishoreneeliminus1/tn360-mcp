@@ -8,5 +8,5 @@ services:
       - key: TN360_API_KEY
         sync: false          # Set this secret in the Render dashboard
       - key: TN360_BASE_URL
-        value: https://api-au.telematics.com/v1
+        value: https://api-au.telematics.com
     autoDeploy: true
