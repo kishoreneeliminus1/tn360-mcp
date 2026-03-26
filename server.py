@@ -277,6 +277,18 @@ async def get_geofences() -> dict:
 async def get_vehicle_odometer(vehicle_id: int) -> dict:
     return await _get(f"/vehicles/{vehicle_id}/meters")
 
+@mcp.tool()
+async def get_vehicle_users(vehicle_id: int) -> dict:
+    return await _get(f"/vehicles/{vehicle_id}/users")
+
+@mcp.tool()
+async def get_vehicle_fleets(vehicle_id: int) -> dict:
+    return await _get(f"/vehicles/{vehicle_id}/fleets")
+    
+@mcp.tool()
+async def get_vehicle_within(vehicle_id: int) -> dict:
+    return await _get(f"/vehicles/{vehicle_id}/within", {"location_type": "all"})
+
 
 # =========================================================================== #
 # HEALTH + OAUTH
