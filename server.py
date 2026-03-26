@@ -2,24 +2,29 @@
 TN360 MCP Server
 Exposes Teletrac Navman TN360 fleet telematics data to Claude via MCP.
 """
+
 import os
 import httpx
 import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Any
+
 from fastmcp import FastMCP
 from starlette.applications import Starlette
-from starlette.routing import Route, Mount
 from starlette.responses import JSONResponse
+from starlette.routing import Route, Mount
+
 
 mcp = FastMCP("TN360 Fleet Server")
 
-# --------------------------------------------------------------------------- #
-# TN360 API CONFIG
-# --------------------------------------------------------------------------- #
+
+# =========================================================================== #
+# CONFIG
+# =========================================================================== #
 
 TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
 TN360_API_KEY  = os.environ.get("TN360_API_KEY", "")
+
 
 def _headers() -> dict:
     if not TN360_API_KEY:
@@ -30,23 +35,25 @@ def _headers() -> dict:
         "Content-Type": "application/json",
     }
 
-# --------------------------------------------------------------------------- #
-# VALID EVENT TYPES (TN360 AU — verified from Events.yaml and docs)
-# --------------------------------------------------------------------------- #
+
+# =========================================================================== #
+# VALID EVENT TYPES (AU Region)
+# =========================================================================== #
 VALID_TN360_EVENT_TYPES = {
-    # Core & common
-    "ignition", "SPEED", "position", "geofence", "camera", "DRIVER",
+    # Core + common
+    "ignition", "speed", "position", "geofence", "camera",
     "gpio", "installation", "alarm", "alert", "communication",
     "mass", "pto", "pretrip",
 
-    # Behavioural (enabled per tenant)
+    # Behavioural (may depend on tenant capabilities)
     "harshBraking", "harshAcceleration", "harshCornering",
     "overRevving", "driverFatigue", "driverDistraction",
     "seatbeltViolation",
 }
 
+
 def sanitize_event_types(raw: str) -> str:
-    """Return only valid, AU‑approved event types."""
+    """Validate and return only allowed AU event types."""
     cleaned = []
     for t in raw.split(","):
         t = t.strip()
@@ -54,58 +61,152 @@ def sanitize_event_types(raw: str) -> str:
             cleaned.append(t)
     return ",".join(cleaned)
 
-# --------------------------------------------------------------------------- #
-# Robust HTTP GET with retry + long timeout + error handling
-# --------------------------------------------------------------------------- #
-
-async def _get(path: str, params: dict | None = None) -> dict | list:
-    url = f"{TN360_BASE_URL}/v1{path}"
-
-    timeout = httpx.Timeout(60.0)
-    params = params or {}
-
-    # Retry loop to handle read timeouts, TN360 slowness, transient network issues
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.get(url, headers=_headers(), params=params)
-                r.raise_for_status()
-                return r.json()
-
-        except httpx.ReadTimeout:
-            if attempt == 2:
-                raise
-            await asyncio.sleep(2.0 * (attempt + 1))
-
-        except httpx.HTTPStatusError:
-            # Pass through HTTP errors (400, 401, 403, 500, etc.)
-            raise
-
-# --------------------------------------------------------------------------- #
-# MCP Tools
-# --------------------------------------------------------------------------- #
-
-@mcp.tool()
-async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
-    """List all vehicles in the TN360 account."""
-    params = {"fleetId": fleet_id} if fleet_id else {}
-    data = await _get("/vehicles", params)
-    return {"vehicles": data, "count": len(data) if isinstance(data, list) else None}
-
-@mcp.tool()
-async def get_vehicle_location(vehicle_id: int) -> dict:
-    """Get the current GPS location and status of a specific vehicle."""
-    try:
-        return await _get(f"/vehicles/{vehicle_id}/position")
-    except httpx.HTTPStatusError as e:
-        return {"error": str(e), "vehicle_id": vehicle_id}
-
 
 DEFAULT_EVENT_TYPES = (
     "ignition,speed,position,geofence,camera,gpio,installation,alarm,alert,"
     "communication,mass,pto,pretrip,harshBraking,harshAcceleration,"
     "harshCornering,overRevving,driverFatigue,driverDistraction,seatbeltViolation"
 )
+
+
+# =========================================================================== #
+# CENTRAL SMART GET HANDLER (Option A)
+# =========================================================================== #
+
+async def _get(path: str, params: dict | None = None) -> dict | list:
+    """
+    Single smart handler for ALL TN360 endpoints:
+    - Retries on timeouts
+    - Handles all HTTP status codes
+    - Always returns structured JSON
+    - Never raises uncaught exceptions (MCP safe)
+    """
+
+    url = f"{TN360_BASE_URL}/v1{path}"
+    timeout = httpx.Timeout(60.0)
+    params = params or {}
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(url, headers=_headers(), params=params)
+
+                # ------------------------
+                # SUCCESS
+                # ------------------------
+                if 200 <= r.status_code < 300:
+                    try:
+                        return r.json()
+                    except Exception:
+                        return {
+                            "error": "Invalid JSON from TN360",
+                            "response_text": r.text,
+                            "url": str(r.url)
+                        }
+
+                # ------------------------
+                # SMART HANDLING FOR KNOWN TN360 RESPONSES
+                # ------------------------
+
+                if r.status_code == 400:
+                    return {
+                        "error": "400 Bad Request – The request parameters were invalid.",
+                        "url": str(r.url),
+                        "params": params,
+                        "response": r.text,
+                    }
+
+                if r.status_code == 401:
+                    return {
+                        "error": "401 Unauthorized – Invalid API Key or expired credential.",
+                        "url": str(r.url),
+                    }
+
+                if r.status_code == 403:
+                    return {
+                        "error": "403 Forbidden – No permission for this resource.",
+                        "url": str(r.url),
+                    }
+
+                if r.status_code == 404:
+                    return {
+                        "note": "No data found for this request.",
+                        "url": str(r.url),
+                        "params": params,
+                        "data": [],
+                    }
+
+                if r.status_code == 409:
+                    return {
+                        "error": "409 Conflict – The requested resource is in conflict.",
+                        "url": str(r.url),
+                        "params": params,
+                    }
+
+                if r.status_code == 423:
+                    return {
+                        "error": "423 Locked – The requested TN360 entity is locked.",
+                        "url": str(r.url),
+                    }
+
+                if r.status_code == 429:
+                    return {
+                        "error": "429 Rate Limited – Too many requests.",
+                        "retry_after": r.headers.get("Retry-After"),
+                    }
+
+                if r.status_code >= 500:
+                    return {
+                        "error": f"TN360 Server Error ({r.status_code})",
+                        "url": str(r.url),
+                        "response": r.text,
+                    }
+
+                # Unknown status
+                return {
+                    "error": f"Unexpected HTTP status {r.status_code}",
+                    "response": r.text,
+                    "url": str(r.url)
+                }
+
+        except httpx.ReadTimeout:
+            if attempt == 2:
+                return {
+                    "error": "ReadTimeout – TN360 did not respond in time.",
+                    "url": url,
+                    "params": params,
+                }
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+        except httpx.ConnectError:
+            return {
+                "error": "Connection error – could not reach TN360.",
+                "url": url,
+            }
+
+        except Exception as e:
+            return {
+                "error": f"Unexpected exception: {str(e)}",
+                "url": url,
+                "params": params,
+            }
+
+
+# =========================================================================== #
+# MCP Tools
+# =========================================================================== #
+
+@mcp.tool()
+async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
+    params = {"fleetId": fleet_id} if fleet_id else {}
+    data = await _get("/vehicles", params)
+    return {"vehicles": data, "count": len(data) if isinstance(data, list) else None}
+
+
+@mcp.tool()
+async def get_vehicle_location(vehicle_id: int) -> dict:
+    return await _get(f"/vehicles/{vehicle_id}/position")
+
 
 @mcp.tool()
 async def get_events(
@@ -115,14 +216,18 @@ async def get_events(
 ) -> dict:
 
     hours_back = min(hours_back, 168)
-    now = datetime.now(timezone.utc)
-    from_dt = (now - timedelta(hours=hours_back)).isoformat().replace("+00:00", "Z")
-    to_dt = now.isoformat().replace("+00:00", "Z")
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    start = (now - timedelta(hours=hours_back)).replace(microsecond=0)
+
+    from_dt = start.isoformat().replace("+00:00", "Z")
+    to_dt   = now.isoformat().replace("+00:00", "Z")
 
     filtered_types = sanitize_event_types(event_types)
 
+    # Safety fallback: always have valid event types
     if not filtered_types:
-        filtered_types = "DRIVER,ignition,SPEED"
+        filtered_types = "ignition,speed"
 
     params = {
         "types": filtered_types,
@@ -135,54 +240,51 @@ async def get_events(
         params["vehicleId"] = vehicle_id
 
     data = await _get("/events", params)
+    return {"events": data, "count": len(data) if isinstance(data, list) else None}
 
-    return {
-        "events": data,
-        "count": len(data) if isinstance(data, list) else None
-    }
+
 @mcp.tool()
 async def get_fleets() -> dict:
-    """List all virtual fleet groups in the TN360 account."""
     data = await _get("/fleets")
     return {"fleets": data, "count": len(data) if isinstance(data, list) else None}
 
+
 @mcp.tool()
 async def get_drivers(status: str = "active") -> dict:
-    """List drivers registered in the TN360 platform."""
     params = {} if status == "all" else {"status": status}
     data = await _get("/drivers", params)
     return {"drivers": data, "count": len(data) if isinstance(data, list) else None}
 
+
 @mcp.tool()
 async def get_trips(vehicle_id: int, days_back: int = 7) -> dict:
-    """Retrieve completed trip history for a vehicle."""
     days_back = min(days_back, 30)
     now = datetime.now(timezone.utc)
     from_dt = (now - timedelta(days=days_back)).strftime("%Y-%m-%d")
     to_dt   = now.strftime("%Y-%m-%d")
-    data    = await _get(f"/vehicles/{vehicle_id}/trips", {"from": from_dt, "to": to_dt})
+    data    = await _get(f"/vehicles/{vehicle_id}/trips",
+                         {"from": from_dt, "to": to_dt})
     return {"trips": data, "vehicle_id": vehicle_id}
+
 
 @mcp.tool()
 async def get_geofences() -> dict:
-    """List all geofences configured in the TN360 account."""
     data = await _get("/geofences")
     return {"geofences": data, "count": len(data) if isinstance(data, list) else None}
 
+
 @mcp.tool()
 async def get_vehicle_odometer(vehicle_id: int) -> dict:
-    """Get the current odometer reading for a vehicle."""
-    try:
-        return await _get(f"/vehicles/{vehicle_id}/odometer")
-    except httpx.HTTPStatusError as e:
-        return {"error": str(e), "vehicle_id": vehicle_id}
+    return await _get(f"/vehicles/{vehicle_id}/odometer")
 
-# --------------------------------------------------------------------------- #
+
+# =========================================================================== #
 # HEALTH + OAUTH
-# --------------------------------------------------------------------------- #
+# =========================================================================== #
 
 async def health(request):
     return JSONResponse({"status": "ok"})
+
 
 async def oauth_metadata(request):
     return JSONResponse({
@@ -190,9 +292,10 @@ async def oauth_metadata(request):
         "response_types_supported": ["token"],
     })
 
-# --------------------------------------------------------------------------- #
-# APP INITIALISATION
-# --------------------------------------------------------------------------- #
+
+# =========================================================================== #
+# APP
+# =========================================================================== #
 
 mcp_app = mcp.http_app(path="/mcp")
 
