@@ -289,6 +289,37 @@ async def get_vehicle_fleets(vehicle_id: int) -> dict:
 async def get_vehicle_within(vehicle_id: int) -> dict:
     return await _get(f"/vehicles/{vehicle_id}/within", {"location_type": "all"})
 
+@mcp.tool()
+async def get_vehicle_devices(vehicle_id: int) -> dict:
+    return await _get(f"/vehicles/{vehicle_id}/devices", {"pruning": "all"})
+
+
+@mcp.tool()
+async def get_vehicle_drivers(
+    hours_back: int = 24,
+    vehicle_id: Optional[int] = None,
+) -> dict:
+
+    hours_back = min(hours_back, 168)
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    start = (now - timedelta(hours=hours_back)).replace(microsecond=0)
+
+    from_dt = start.isoformat().replace("+00:00", "Z")
+    to_dt   = now.isoformat().replace("+00:00", "Z") 
+
+    params = {
+        "types": "DRIVER",
+        "from": from_dt,
+        "to": to_dt,
+        "pruning": "ALL",
+    }
+
+    if vehicle_id:
+        params["vehicleId"] = vehicle_id
+
+    data = await _get("/events", params)
+    return {"Driver events": data, "count": len(data) if isinstance(data, list) else None} 
 
 # =========================================================================== #
 # HEALTH + OAUTH
