@@ -100,33 +100,35 @@ async def get_vehicle_location(vehicle_id: int) -> dict:
     except httpx.HTTPStatusError as e:
         return {"error": str(e), "vehicle_id": vehicle_id}
 
+
+DEFAULT_EVENT_TYPES = (
+    "ignition,speed,position,geofence,camera,gpio,installation,alarm,alert,"
+    "communication,mass,pto,pretrip,harshBraking,harshAcceleration,"
+    "harshCornering,overRevving,driverFatigue,driverDistraction,seatbeltViolation"
+)
+
 @mcp.tool()
 async def get_events(
-    event_types: str = (
-        "ignition,speed,position,geofence,camera,gpio,installation,alarm,alert,"
-        "communication,mass,pto,pretrip,harshBraking,harshAcceleration,"
-        "harshCornering,overRevving,driverFatigue,driverDistraction,seatbeltViolation"
-    ),
+    event_types: str = DEFAULT_EVENT_TYPES,
     hours_back: int = 24,
     vehicle_id: Optional[int] = None,
 ) -> dict:
-    """Retrieve fleet events with full ISO8601 date+time window."""
 
-    # Clamp to TN360 max (7 days)
     hours_back = min(hours_back, 168)
-
     now = datetime.now(timezone.utc)
     from_dt = (now - timedelta(hours=hours_back)).isoformat().replace("+00:00", "Z")
-    to_dt   = now.isoformat().replace("+00:00", "Z")
+    to_dt = now.isoformat().replace("+00:00", "Z")
 
-    # Clean invalid event types to avoid 400/417 errors
     filtered_types = sanitize_event_types(event_types)
+
+    if not filtered_types:
+        filtered_types = "DRIVER,ignition,speed"
 
     params = {
         "types": filtered_types,
         "from": from_dt,
         "to": to_dt,
-        "pruning": "ALL"
+        "pruning": "ALL",
     }
 
     if vehicle_id:
@@ -138,7 +140,6 @@ async def get_events(
         "events": data,
         "count": len(data) if isinstance(data, list) else None
     }
-
 @mcp.tool()
 async def get_fleets() -> dict:
     """List all virtual fleet groups in the TN360 account."""
