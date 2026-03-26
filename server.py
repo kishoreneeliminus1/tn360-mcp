@@ -275,7 +275,7 @@ async def get_geofences() -> dict:
 
 @mcp.tool()
 async def get_vehicle_odometer(vehicle_id: int) -> dict:
-    return await _get(f"/vehicles/{vehicle_id}/odometer")
+    return await _get(f"/vehicles/{vehicle_id}/meters")
 
 
 # =========================================================================== #
