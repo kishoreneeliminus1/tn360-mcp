@@ -1,5 +1,178 @@
+"""
+TN360 MCP Server
+Exposes Teletrac Navman TN360 fleet telematics data to Claude via MCP.
+"""
+
+import os
+import httpx
+import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Any
+
+from fastmcp import FastMCP
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Route, Mount
+
+
+mcp = FastMCP("TN360 Fleet Server")
+
+
 # =========================================================================== #
-# MCP Tools (FastMCP Safe)
+# CONFIG
+# =========================================================================== #
+
+TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
+TN360_API_KEY  = os.environ.get("TN360_API_KEY", "")
+
+
+def _headers() -> dict:
+    if not TN360_API_KEY:
+        raise RuntimeError("TN360_API_KEY environment variable is not set.")
+    return {
+        "Authorization": f"Bearer {TN360_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+# =========================================================================== #
+# EVENT TYPE FILTERING
+# =========================================================================== #
+
+VALID_TN360_EVENT_TYPES = {
+    "ignition", "speed", "position", "geofence", "camera",
+    "gpio", "installation", "alarm", "alert", "communication",
+    "mass", "pto", "pretrip",
+    "harshBraking", "harshAcceleration", "harshCornering",
+    "overRevving", "driverFatigue", "driverDistraction",
+    "seatbeltViolation",
+}
+
+def sanitize_event_types(raw: str) -> str:
+    cleaned = []
+    for t in raw.split(","):
+        t = t.strip()
+        if t in VALID_TN360_EVENT_TYPES:
+            cleaned.append(t)
+    return ",".join(cleaned)
+
+
+DEFAULT_EVENT_TYPES = (
+    "ignition,speed,position,geofence,camera,gpio,installation,alarm,alert,"
+    "communication,mass,pto,pretrip,harshBraking,harshAcceleration,"
+    "harshCornering,overRevving,driverFatigue,driverDistraction,seatbeltViolation"
+)
+
+
+# =========================================================================== #
+# UNIVERSAL SAFE WRAPPER (CRITICAL FOR FASTMCP)
+# =========================================================================== #
+
+def wrap_result(raw: Any) -> dict:
+    """
+    Ensures tool output is FastMCP-safe:
+    - Always returns {success, data, error, meta}
+    - Never leaks invalid shapes to convert_result()
+    """
+    # TN360 errors are dicts with "error": ...
+    if isinstance(raw, dict):
+        if "error" in raw:
+            return {
+                "success": False,
+                "data": None,
+                "error": raw.get("error"),
+                "meta": {k: v for k, v in raw.items() if k not in ("error",)}
+            }
+        return {
+            "success": True,
+            "data": raw,
+            "error": None,
+            "meta": {}
+        }
+
+    # Normal lists
+    if isinstance(raw, list):
+        return {
+            "success": True,
+            "data": raw,
+            "error": None,
+            "meta": {"count": len(raw)}
+        }
+
+    # Unknown shapes
+    return {
+        "success": False,
+        "data": None,
+        "error": f"Unexpected TN360 response type: {type(raw).__name__}",
+        "meta": {"raw": str(raw)}
+    }
+
+
+# =========================================================================== #
+# SMART GET WRAPPER
+# =========================================================================== #
+
+async def _get(path: str, params: dict | None = None) -> dict | list:
+    url = f"{TN360_BASE_URL}/v1{path}"
+    timeout = httpx.Timeout(60.0)
+    params = params or {}
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.get(url, headers=_headers(), params=params)
+
+                if 200 <= r.status_code < 300:
+                    try:
+                        return r.json()
+                    except Exception:
+                        return {
+                            "error": "Invalid JSON from TN360",
+                            "response_text": r.text,
+                            "url": str(r.url)
+                        }
+
+                if r.status_code == 400:
+                    return {"error": "400 Bad Request", "url": str(r.url), "params": params, "response": r.text}
+
+                if r.status_code == 401:
+                    return {"error": "401 Unauthorized – Invalid API key", "url": str(r.url)}
+
+                if r.status_code == 403:
+                    return {"error": "403 Forbidden", "url": str(r.url)}
+
+                if r.status_code == 404:
+                    return {"note": "No data found", "url": str(r.url), "params": params, "data": []}
+
+                if r.status_code == 409:
+                    return {"error": "409 Conflict", "url": str(r.url), "params": params}
+
+                if r.status_code == 423:
+                    return {"error": "423 Locked", "url": str(r.url)}
+
+                if r.status_code == 429:
+                    return {"error": "429 Rate Limited", "retry_after": r.headers.get("Retry-After")}
+
+                if r.status_code >= 500:
+                    return {"error": f"TN360 Server Error {r.status_code}", "url": str(r.url), "response": r.text}
+
+                return {"error": f"Unexpected HTTP status {r.status_code}", "response": r.text, "url": str(r.url)}
+
+        except httpx.ReadTimeout:
+            if attempt == 2:
+                return {"error": "ReadTimeout – TN360 did not respond", "url": url, "params": params}
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+        except httpx.ConnectError:
+            return {"error": "Connection error – TN360 unreachable", "url": url}
+
+        except Exception as e:
+            return {"error": f"Unexpected exception: {str(e)}", "url": url, "params": params}
+
+
+# =========================================================================== #
+# MCP TOOLS — NOW 100% SAFE
 # =========================================================================== #
 
 @mcp.tool()
@@ -97,6 +270,7 @@ async def get_vehicle_drivers(
 ) -> dict:
 
     hours_back = min(hours_back, 168)
+
     now = datetime.now(timezone.utc).replace(microsecond=0)
     start = (now - timedelta(hours_back)).replace(microsecond=0)
 
@@ -111,3 +285,33 @@ async def get_vehicle_drivers(
         params["vehicleId"] = vehicle_id
 
     return wrap_result(await _get("/events", params))
+
+
+# =========================================================================== #
+# SYSTEM ROUTES
+# =========================================================================== #
+
+async def health(request):
+    return JSONResponse({"status": "ok"})
+
+async def oauth_metadata(request):
+    return JSONResponse({
+        "issuer": "https://tn360-mcp.onrender.com",
+        "response_types_supported": ["token"],
+    })
+
+
+# =========================================================================== #
+# STARLETTE APP
+# =========================================================================== #
+
+mcp_app = mcp.http_app(path="/mcp")
+
+app = Starlette(
+    lifespan=mcp_app.lifespan,
+    routes=[
+        Route("/health", health),
+        Route("/.well-known/oauth-authorization-server", oauth_metadata),
+        Mount("/", app=mcp_app),
+    ],
+)
