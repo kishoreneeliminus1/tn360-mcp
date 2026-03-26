@@ -250,10 +250,10 @@ async def get_fleets() -> dict:
 
 
 @mcp.tool()
-async def get_drivers(status: str = "active") -> dict:
-    params = {} if status == "all" else {"status": status}
-    data = await _get("/drivers", params)
-    return {"drivers": data, "count": len(data) if isinstance(data, list) else None}
+async def get_users(status: str = "active") -> dict:
+    params = {} if status == "all" else {"code": status}
+    data = await _get("/users", params)
+    return {"users": data, "count": len(data) if isinstance(data, list) else None}
 
 
 @mcp.tool()
@@ -292,12 +292,6 @@ async def get_vehicle_within(vehicle_id: int) -> dict:
 @mcp.tool()
 async def get_vehicle_devices(vehicle_id: int) -> dict:
     return await _get(f"/vehicles/{vehicle_id}/devices", {"pruning": "all"})
-
-@mcp.tool()
-async def get_users() -> dict:
-    data = await _get("/users")
-    return {"users": data, "count": len(data) if isinstance(data, list) else None}
-
 
 @mcp.tool()
 async def get_vehicle_drivers(
