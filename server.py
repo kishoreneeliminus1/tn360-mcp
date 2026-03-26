@@ -293,6 +293,11 @@ async def get_vehicle_within(vehicle_id: int) -> dict:
 async def get_vehicle_devices(vehicle_id: int) -> dict:
     return await _get(f"/vehicles/{vehicle_id}/devices", {"pruning": "all"})
 
+@mcp.tool()
+async def get_users() -> dict:
+    data = await _get("/users")
+    return {"users": data, "count": len(data) if isinstance(data, list) else None}
+
 
 @mcp.tool()
 async def get_vehicle_drivers(
