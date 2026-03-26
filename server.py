@@ -35,7 +35,7 @@ def _headers() -> dict:
 # --------------------------------------------------------------------------- #
 VALID_TN360_EVENT_TYPES = {
     # Core & common
-    "ignition", "speed", "position", "geofence", "camera",
+    "ignition", "SPEED", "position", "geofence", "camera", "DRIVER",
     "gpio", "installation", "alarm", "alert", "communication",
     "mass", "pto", "pretrip",
 
@@ -122,7 +122,7 @@ async def get_events(
     filtered_types = sanitize_event_types(event_types)
 
     if not filtered_types:
-        filtered_types = "DRIVER,ignition,speed"
+        filtered_types = "DRIVER,ignition,SPEED"
 
     params = {
         "types": filtered_types,
