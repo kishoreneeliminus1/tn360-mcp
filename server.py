@@ -27,7 +27,7 @@ def _headers() -> dict:
 
 async def _get(path: str, params: dict | None = None) -> dict | list:
     url = f"{TN360_BASE_URL}/v1{path}"
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(url, headers=_headers(), params=params or {})
         r.raise_for_status()
         return r.json()
@@ -69,7 +69,7 @@ async def get_events(
     to_dt   = now.isoformat().replace("+00:00", "Z")
 
     params: dict = {
-        "types": "camera,DRIVER,fatigue,geofence,gpio,ignition,pretrip,pto,runsheet,speed,summary,trip,vpm",
+        "types": "camera,DRIVER,geofence,runsheet,speed,summary,trip",
         "from": from_dt,
         "to": to_dt,
         "pruning": "ALL"
