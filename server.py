@@ -286,6 +286,114 @@ async def get_vehicle_drivers(
 
     return wrap_result(await _get("/events", params))
 
+# =========================================================================== #
+# PUT WRAPPER (TN360 Update Geofence)
+# =========================================================================== #
+
+async def _put(path: str, payload: dict) -> dict:
+    url = f"{TN360_BASE_URL}/v1{path}"
+    timeout = httpx.Timeout(60.0)
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.put(url, headers=_headers(), json=payload)
+
+                if 200 <= r.status_code < 300:
+                    try:
+                        return r.json()
+                    except Exception:
+                        return {
+                            "error": "Invalid JSON from TN360",
+                            "response_text": r.text,
+                            "url": str(r.url)
+                        }
+
+                if r.status_code == 400:
+                    return {"error": "400 Bad Request", "url": str(r.url), "payload": payload, "response": r.text}
+
+                if r.status_code == 401:
+                    return {"error": "401 Unauthorized – Invalid API key", "url": str(r.url)}
+
+                if r.status_code == 403:
+                    return {"error": "403 Forbidden", "url": str(r.url)}
+
+                if r.status_code == 404:
+                    return {"error": "404 Not Found – Geofence does not exist", "url": str(r.url)}
+
+                if r.status_code == 409:
+                    return {"error": "409 Conflict", "url": str(r.url), "payload": payload}
+
+                if r.status_code == 423:
+                    return {"error": "423 Locked", "url": str(r.url)}
+
+                if r.status_code == 429:
+                    return {"error": "429 Rate Limited", "retry_after": r.headers.get("Retry-After")}
+
+                if r.status_code >= 500:
+                    return {"error": f"TN360 Server Error {r.status_code}", "url": str(r.url), "response": r.text}
+
+                return {"error": f"Unexpected HTTP status {r.status_code}", "response": r.text, "url": str(r.url)}
+
+        except httpx.ReadTimeout:
+            if attempt == 2:
+                return {"error": "ReadTimeout – TN360 did not respond", "url": url, "payload": payload}
+            await asyncio.sleep(1.5 * (attempt + 1))
+
+        except httpx.ConnectError:
+            return {"error": "Connection error – TN360 unreachable", "url": url}
+
+        except Exception as e:
+            return {"error": f"Unexpected exception: {str(e)}", "url": url, "payload": payload}
+
+
+
+# =========================================================================== #
+# MCP TOOL: update_geofence
+# =========================================================================== #
+
+@mcp.tool()
+async def update_geofence(
+    geofence_id: int,
+    name: Optional[str] = None,
+    geotype: Optional[str] = None,
+    coordinates: Optional[list] = None,
+    thresholdSpeed: Optional[int] = None,
+    properties: Optional[dict] = None
+) -> dict:
+    """
+    Updates an existing TN360 geofence (PUT /geofences/{id}).
+
+    Example: update threshold speed
+    update_geofence(1234, thresholdSpeed=40)
+    """
+
+    # Build payload dynamically (TN360 allows partial updates)
+    payload: dict = {}
+
+    if name is not None:
+        payload["name"] = name
+
+    if geotype is not None:
+        payload["type"] = geotype
+
+    if coordinates is not None:
+        payload["coordinates"] = coordinates
+
+    # Merge custom properties
+    merged_properties = properties.copy() if properties else {}
+    if thresholdSpeed is not None:
+        merged_properties["thresholdSpeed"] = thresholdSpeed
+
+    if merged_properties:
+        payload["properties"] = merged_properties
+
+    # Perform PUT
+    result = await _put(f"/geofences/{geofence_id}", payload)
+
+    # Wrap TN360 output to be MCP‑safe
+    return wrap_result(result)
+
 
 # =========================================================================== #
 # SYSTEM ROUTES
