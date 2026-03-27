@@ -189,19 +189,28 @@ async def get_vehicle_location(vehicle_id: int) -> dict:
 @mcp.tool()
 async def get_events(
     event_types: str = DEFAULT_EVENT_TYPES,
-    hours_back: int = 24,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     vehicle_id: Optional[int] = None,
 ) -> dict:
 
-    hours_back = min(hours_back, 168)
-
+    # Default to last 6 days if no dates provided
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    start = (now - timedelta(hours_back)).replace(microsecond=0)
+
+    if to_date:
+        to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc)
+    else:
+        to_dt = now
+
+    if from_date:
+        from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc)
+    else:
+        from_dt = to_dt - timedelta(days=6)
 
     params = {
         "types": sanitize_event_types(event_types) or "ignition,speed",
-        "from": start.isoformat().replace("+00:00", "Z"),
-        "to": now.isoformat().replace("+00:00", "Z"),
+        "from": from_dt.isoformat().replace("+00:00", "Z"),
+        "to": to_dt.isoformat().replace("+00:00", "Z"),
         "pruning": "ALL",
     }
 
@@ -221,15 +230,30 @@ async def get_users(status: str = "active") -> dict:
     params = {} if status == "all" else {"code": status}
     return wrap_result(await _get("/users", params))
 
-
 @mcp.tool()
-async def get_trips(vehicle_id: int, days_back: int = 7) -> dict:
-    days_back = min(days_back, 30)
-    now = datetime.now(timezone.utc)
+async def get_trips(
+    vehicle_id: int,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> dict:
+
+    now = datetime.now(timezone.utc).date()
+
+    if to_date:
+        to_dt = datetime.fromisoformat(to_date).date()
+    else:
+        to_dt = now
+
+    if from_date:
+        from_dt = datetime.fromisoformat(from_date).date()
+    else:
+        from_dt = to_dt - timedelta(days=6)
+
     params = {
-        "from": (now - timedelta(days_back)).strftime("%Y-%m-%d"),
-        "to": now.strftime("%Y-%m-%d"),
+        "from": from_dt.strftime("%Y-%m-%d"),
+        "to": to_dt.strftime("%Y-%m-%d"),
     }
+
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/trips", params))
 
 
@@ -265,19 +289,27 @@ async def get_vehicle_devices(vehicle_id: int) -> dict:
 
 @mcp.tool()
 async def get_vehicle_drivers(
-    hours_back: int = 24,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
     vehicle_id: Optional[int] = None,
 ) -> dict:
 
-    hours_back = min(hours_back, 168)
-
     now = datetime.now(timezone.utc).replace(microsecond=0)
-    start = (now - timedelta(hours_back)).replace(microsecond=0)
+
+    if to_date:
+        to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc)
+    else:
+        to_dt = now
+
+    if from_date:
+        from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc)
+    else:
+        from_dt = to_dt - timedelta(days=6)
 
     params = {
         "types": "DRIVER",
-        "from": start.isoformat().replace("+00:00", "Z"),
-        "to": now.isoformat().replace("+00:00", "Z"),
+        "from": from_dt.isoformat().replace("+00:00", "Z"),
+        "to": to_dt.isoformat().replace("+00:00", "Z"),
         "pruning": "ALL",
     }
 
