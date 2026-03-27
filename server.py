@@ -59,7 +59,7 @@ def sanitize_event_types(raw: str) -> str:
 
 
 DEFAULT_EVENT_TYPES = (
-    "ignition,speed,position,geofence,camera,gpio,installation,alarm,alert,"
+    "speed,position,geofence,camera,gpio,installation,alarm,alert,"
     "communication,mass,pto,pretrip,harshBraking,harshAcceleration,"
     "harshCornering,overRevving,driverFatigue,driverDistraction,seatbeltViolation"
 )
@@ -208,7 +208,7 @@ async def get_events(
         from_dt = to_dt - timedelta(days=6)
 
     params = {
-        "types": sanitize_event_types(event_types) or "ignition,speed",
+        "types": sanitize_event_types(event_types) or "camera,speed",
         "from": from_dt.isoformat().replace("+00:00", "Z"),
         "to": to_dt.isoformat().replace("+00:00", "Z"),
         "pruning": "ALL",
