@@ -212,7 +212,7 @@ async def get_events(
     from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc) if from_date else to_dt - timedelta(days=6)
 
     params = {
-        "types": sanitize_event_types(event_types) or "camera,speed",
+        "types": sanitize_event_types(event_types) or "camera,speed,position,gpio",
         "from": from_dt.isoformat().replace("+00:00", "Z"),
         "to": to_dt.isoformat().replace("+00:00", "Z"),
         "pruning": "ALL",
