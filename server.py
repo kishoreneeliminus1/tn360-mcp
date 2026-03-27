@@ -1,11 +1,11 @@
-"""
-TN360 MCP Server
-Exposes Teletrac Navman TN360 fleet telematics data to Claude via MCP.
-"""
+# ============================================================================ #
+# TN360 MCP Server – Fully Integrated with DashCam Video Support
+# ============================================================================ #
 
 import os
 import httpx
 import asyncio
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 
@@ -14,13 +14,12 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
 
-
 mcp = FastMCP("TN360 Fleet Server")
 
 
-# =========================================================================== #
+# ============================================================================ #
 # CONFIG
-# =========================================================================== #
+# ============================================================================ #
 
 TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
 TN360_API_KEY  = os.environ.get("TN360_API_KEY", "")
@@ -36,9 +35,9 @@ def _headers() -> dict:
     }
 
 
-# =========================================================================== #
+# ============================================================================ #
 # EVENT TYPE FILTERING
-# =========================================================================== #
+# ============================================================================ #
 
 VALID_TN360_EVENT_TYPES = {
     "ignition", "speed", "position", "geofence", "camera",
@@ -65,24 +64,18 @@ DEFAULT_EVENT_TYPES = (
 )
 
 
-# =========================================================================== #
-# UNIVERSAL SAFE WRAPPER (CRITICAL FOR FASTMCP)
-# =========================================================================== #
+# ============================================================================ #
+# UNIVERSAL SAFE WRAPPER
+# ============================================================================ #
 
 def wrap_result(raw: Any) -> dict:
-    """
-    Ensures tool output is FastMCP-safe:
-    - Always returns {success, data, error, meta}
-    - Never leaks invalid shapes to convert_result()
-    """
-    # TN360 errors are dicts with "error": ...
     if isinstance(raw, dict):
         if "error" in raw:
             return {
                 "success": False,
                 "data": None,
-                "error": raw.get("error"),
-                "meta": {k: v for k, v in raw.items() if k not in ("error",)}
+                "error": raw["error"],
+                "meta": {k: v for k, v in raw.items() if k != "error"}
             }
         return {
             "success": True,
@@ -91,7 +84,6 @@ def wrap_result(raw: Any) -> dict:
             "meta": {}
         }
 
-    # Normal lists
     if isinstance(raw, list):
         return {
             "success": True,
@@ -100,7 +92,6 @@ def wrap_result(raw: Any) -> dict:
             "meta": {"count": len(raw)}
         }
 
-    # Unknown shapes
     return {
         "success": False,
         "data": None,
@@ -109,9 +100,9 @@ def wrap_result(raw: Any) -> dict:
     }
 
 
-# =========================================================================== #
-# SMART GET WRAPPER
-# =========================================================================== #
+# ============================================================================ #
+# GET WRAPPER
+# ============================================================================ #
 
 async def _get(path: str, params: dict | None = None) -> dict | list:
     url = f"{TN360_BASE_URL}/v1{path}"
@@ -129,51 +120,72 @@ async def _get(path: str, params: dict | None = None) -> dict | list:
                     except Exception:
                         return {
                             "error": "Invalid JSON from TN360",
-                            "response_text": r.text,
-                            "url": str(r.url)
+                            "response_text": r.text
                         }
 
-                if r.status_code == 400:
-                    return {"error": "400 Bad Request", "url": str(r.url), "params": params, "response": r.text}
-
-                if r.status_code == 401:
-                    return {"error": "401 Unauthorized – Invalid API key", "url": str(r.url)}
-
-                if r.status_code == 403:
-                    return {"error": "403 Forbidden", "url": str(r.url)}
-
-                if r.status_code == 404:
-                    return {"note": "No data found", "url": str(r.url), "params": params, "data": []}
-
-                if r.status_code == 409:
-                    return {"error": "409 Conflict", "url": str(r.url), "params": params}
-
-                if r.status_code == 423:
-                    return {"error": "423 Locked", "url": str(r.url)}
-
-                if r.status_code == 429:
-                    return {"error": "429 Rate Limited", "retry_after": r.headers.get("Retry-After")}
-
-                if r.status_code >= 500:
-                    return {"error": f"TN360 Server Error {r.status_code}", "url": str(r.url), "response": r.text}
-
-                return {"error": f"Unexpected HTTP status {r.status_code}", "response": r.text, "url": str(r.url)}
-
-        except httpx.ReadTimeout:
-            if attempt == 2:
-                return {"error": "ReadTimeout – TN360 did not respond", "url": url, "params": params}
-            await asyncio.sleep(1.5 * (attempt + 1))
-
-        except httpx.ConnectError:
-            return {"error": "Connection error – TN360 unreachable", "url": url}
+                return {"error": f"HTTP {r.status_code}", "response": r.text}
 
         except Exception as e:
-            return {"error": f"Unexpected exception: {str(e)}", "url": url, "params": params}
+            if attempt == 2:
+                return {"error": str(e)}
+            await asyncio.sleep(1.5 * (attempt + 1))
 
 
-# =========================================================================== #
-# MCP TOOLS — NOW 100% SAFE
-# =========================================================================== #
+# ============================================================================ #
+# POST WRAPPER (needed for DashCam requests)
+# ============================================================================ #
+
+async def _post(path: str, payload: dict) -> dict:
+    url = f"{TN360_BASE_URL}/v1{path}"
+    timeout = httpx.Timeout(60.0)
+
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(url, headers=_headers(), json=payload)
+
+                if 200 <= r.status_code < 300:
+                    try:
+                        return r.json()
+                    except Exception:
+                        return {
+                            "error": "Invalid JSON from TN360",
+                            "response_text": r.text
+                        }
+
+                return {"error": f"HTTP {r.status_code}", "response": r.text}
+
+        except Exception as e:
+            if attempt == 2:
+                return {"error": str(e)}
+            await asyncio.sleep(1.25 * (attempt + 1))
+
+
+# ============================================================================ #
+# PUT WRAPPER
+# ============================================================================ #
+
+async def _put(path: str, payload: dict) -> dict:
+    url = f"{TN360_BASE_URL}/v1{path}"
+    timeout = httpx.Timeout(60.0)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.put(url, headers=_headers(), json=payload)
+            if 200 <= r.status_code < 300:
+                try:
+                    return r.json()
+                except Exception:
+                    return {"error": "Invalid JSON", "response_text": r.text}
+            return {"error": f"HTTP {r.status_code}", "response": r.text}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ============================================================================ #
+# MCP TOOLS
+# ============================================================================ #
 
 @mcp.tool()
 async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
@@ -194,18 +206,10 @@ async def get_events(
     vehicle_id: Optional[int] = None,
 ) -> dict:
 
-    # Default to last 6 days if no dates provided
     now = datetime.now(timezone.utc).replace(microsecond=0)
 
-    if to_date:
-        to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc)
-    else:
-        to_dt = now
-
-    if from_date:
-        from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc)
-    else:
-        from_dt = to_dt - timedelta(days=6)
+    to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc) if to_date else now
+    from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc) if from_date else to_dt - timedelta(days=6)
 
     params = {
         "types": sanitize_event_types(event_types) or "camera,speed",
@@ -230,6 +234,7 @@ async def get_users(status: str = "active") -> dict:
     params = {} if status == "all" else {"code": status}
     return wrap_result(await _get("/users", params))
 
+
 @mcp.tool()
 async def get_trips(
     vehicle_id: int,
@@ -239,15 +244,8 @@ async def get_trips(
 
     now = datetime.now(timezone.utc).date()
 
-    if to_date:
-        to_dt = datetime.fromisoformat(to_date).date()
-    else:
-        to_dt = now
-
-    if from_date:
-        from_dt = datetime.fromisoformat(from_date).date()
-    else:
-        from_dt = to_dt - timedelta(days=6)
+    to_dt = datetime.fromisoformat(to_date).date() if to_date else now
+    from_dt = datetime.fromisoformat(from_date).date() if from_date else to_dt - timedelta(days=6)
 
     params = {
         "from": from_dt.strftime("%Y-%m-%d"),
@@ -288,101 +286,76 @@ async def get_vehicle_devices(vehicle_id: int) -> dict:
 
 
 @mcp.tool()
-async def get_vehicle_drivers(
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-    vehicle_id: Optional[int] = None,
+async def get_vehicle_images(vehicle_id: int) -> dict:
+    return wrap_result(await _get(f"/vehicles/{vehicle_id}/images"))
+
+
+# ============================================================================ #
+# DASHCAM VIDEO TOOLS
+# ============================================================================ #
+
+@mcp.tool()
+async def request_dashcam_video(
+    device_id: int,
+    start_timestamp: str,
+    end_timestamp: str
 ) -> dict:
+    """
+    Requests dashcam video from TN360 for a time period.
+    """
 
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-
-    if to_date:
-        to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc)
-    else:
-        to_dt = now
-
-    if from_date:
-        from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc)
-    else:
-        from_dt = to_dt - timedelta(days=6)
-
-    params = {
-        "types": "DRIVER",
-        "from": from_dt.isoformat().replace("+00:00", "Z"),
-        "to": to_dt.isoformat().replace("+00:00", "Z"),
-        "pruning": "ALL",
+    payload = {
+        "startTimestamp": start_timestamp,
+        "endTimestamp": end_timestamp
     }
 
-    if vehicle_id:
-        params["vehicleId"] = vehicle_id
-
-    return wrap_result(await _get("/events", params))
-
-# =========================================================================== #
-# PUT WRAPPER (TN360 Update Geofence)
-# =========================================================================== #
-
-async def _put(path: str, payload: dict) -> dict:
-    url = f"{TN360_BASE_URL}/v1{path}"
-    timeout = httpx.Timeout(60.0)
-
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                r = await client.put(url, headers=_headers(), json=payload)
-
-                if 200 <= r.status_code < 300:
-                    try:
-                        return r.json()
-                    except Exception:
-                        return {
-                            "error": "Invalid JSON from TN360",
-                            "response_text": r.text,
-                            "url": str(r.url)
-                        }
-
-                if r.status_code == 400:
-                    return {"error": "400 Bad Request", "url": str(r.url), "payload": payload, "response": r.text}
-
-                if r.status_code == 401:
-                    return {"error": "401 Unauthorized – Invalid API key", "url": str(r.url)}
-
-                if r.status_code == 403:
-                    return {"error": "403 Forbidden", "url": str(r.url)}
-
-                if r.status_code == 404:
-                    return {"error": "404 Not Found – Geofence does not exist", "url": str(r.url)}
-
-                if r.status_code == 409:
-                    return {"error": "409 Conflict", "url": str(r.url), "payload": payload}
-
-                if r.status_code == 423:
-                    return {"error": "423 Locked", "url": str(r.url)}
-
-                if r.status_code == 429:
-                    return {"error": "429 Rate Limited", "retry_after": r.headers.get("Retry-After")}
-
-                if r.status_code >= 500:
-                    return {"error": f"TN360 Server Error {r.status_code}", "url": str(r.url), "response": r.text}
-
-                return {"error": f"Unexpected HTTP status {r.status_code}", "response": r.text, "url": str(r.url)}
-
-        except httpx.ReadTimeout:
-            if attempt == 2:
-                return {"error": "ReadTimeout – TN360 did not respond", "url": url, "payload": payload}
-            await asyncio.sleep(1.5 * (attempt + 1))
-
-        except httpx.ConnectError:
-            return {"error": "Connection error – TN360 unreachable", "url": url}
-
-        except Exception as e:
-            return {"error": f"Unexpected exception: {str(e)}", "url": url, "payload": payload}
+    result = await _post(f"/devices/{device_id}/requestVideo", payload)
+    return wrap_result(result)
 
 
+@mcp.tool()
+async def get_dashcam_video_status(request_id: str) -> dict:
+    """
+    Polls TN360 for dashcam video request status.
+    Returns videoUrl when ready.
+    """
+    result = await _get(f"/video/requests/{request_id}")
+    return wrap_result(result)
 
-# =========================================================================== #
-# MCP TOOL: update_geofence
-# =========================================================================== #
+
+@mcp.tool()
+async def download_dashcam_video(request_id: str) -> dict:
+    """
+    Downloads dashcam video and returns base64-encoded bytes.
+    """
+
+    status = await _get(f"/video/requests/{request_id}")
+
+    if "error" in status:
+        return wrap_result(status)
+
+    video_url = status.get("videoUrl")
+    if not video_url:
+        return wrap_result({"error": "Video not ready", "status": status})
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as client:
+        r = await client.get(video_url)
+
+        if r.status_code != 200:
+            return wrap_result({"error": f"Download failed: {r.status_code}", "response": r.text})
+
+        encoded = base64.b64encode(r.content).decode("utf-8")
+        return {
+            "success": True,
+            "data": {"video_base64": encoded},
+            "error": None,
+            "meta": {"size_bytes": len(r.content)}
+        }
+
+
+# ============================================================================ #
+# GEOFENCE TOOL
+# ============================================================================ #
 
 @mcp.tool()
 async def update_geofence(
@@ -393,14 +366,7 @@ async def update_geofence(
     thresholdSpeed: Optional[int] = None,
     properties: Optional[dict] = None
 ) -> dict:
-    """
-    Updates an existing TN360 geofence (PUT /geofences/{id}).
 
-    Example: update threshold speed
-    update_geofence(1234, thresholdSpeed=40)
-    """
-
-    # Build payload dynamically (TN360 allows partial updates)
     payload: dict = {}
 
     if name is not None:
@@ -412,24 +378,20 @@ async def update_geofence(
     if coordinates is not None:
         payload["coordinates"] = coordinates
 
-    # Merge custom properties
-    merged_properties = properties.copy() if properties else {}
+    merged = properties.copy() if properties else {}
     if thresholdSpeed is not None:
-        merged_properties["thresholdSpeed"] = thresholdSpeed
+        merged["thresholdSpeed"] = thresholdSpeed
 
-    if merged_properties:
-        payload["properties"] = merged_properties
+    if merged:
+        payload["properties"] = merged
 
-    # Perform PUT
     result = await _put(f"/geofences/{geofence_id}", payload)
-
-    # Wrap TN360 output to be MCP‑safe
     return wrap_result(result)
 
 
-# =========================================================================== #
+# ============================================================================ #
 # SYSTEM ROUTES
-# =========================================================================== #
+# ============================================================================ #
 
 async def health(request):
     return JSONResponse({"status": "ok"})
@@ -441,9 +403,9 @@ async def oauth_metadata(request):
     })
 
 
-# =========================================================================== #
+# ============================================================================ #
 # STARLETTE APP
-# =========================================================================== #
+# ============================================================================ #
 
 mcp_app = mcp.http_app(path="/mcp")
 
