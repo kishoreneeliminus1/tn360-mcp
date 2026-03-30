@@ -6,6 +6,7 @@ import os
 import httpx
 import asyncio
 import base64
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 
@@ -16,13 +17,21 @@ from starlette.routing import Route, Mount
 
 mcp = FastMCP("TN360 Fleet Server")
 
+# ============================================================================ #
+# LOGGING CONFIGURATION
+# ============================================================================ #
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 
 # ============================================================================ #
 # CONFIG
 # ============================================================================ #
 
 TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
-TN360_API_KEY  = os.environ.get("TN360_API_KEY", "")
+TN360_API_KEY = os.environ.get("TN360_API_KEY", "")
 
 
 def _headers() -> dict:
@@ -47,6 +56,7 @@ VALID_TN360_EVENT_TYPES = {
     "overRevving", "driverFatigue", "driverDistraction",
     "seatbeltViolation",
 }
+
 
 def sanitize_event_types(raw: str) -> str:
     cleaned = []
@@ -77,20 +87,10 @@ def wrap_result(raw: Any) -> dict:
                 "error": raw["error"],
                 "meta": {k: v for k, v in raw.items() if k != "error"}
             }
-        return {
-            "success": True,
-            "data": raw,
-            "error": None,
-            "meta": {}
-        }
+        return {"success": True, "data": raw, "error": None, "meta": {}}
 
     if isinstance(raw, list):
-        return {
-            "success": True,
-            "data": raw,
-            "error": None,
-            "meta": {"count": len(raw)}
-        }
+        return {"success": True, "data": raw, "error": None, "meta": {"count": len(raw)}}
 
     return {
         "success": False,
@@ -101,7 +101,7 @@ def wrap_result(raw: Any) -> dict:
 
 
 # ============================================================================ #
-# GET WRAPPER
+# GET WRAPPER (WITH LOGGING)
 # ============================================================================ #
 
 async def _get(path: str, params: dict | None = None) -> dict | list:
@@ -109,77 +109,93 @@ async def _get(path: str, params: dict | None = None) -> dict | list:
     timeout = httpx.Timeout(60.0)
     params = params or {}
 
+    logging.info(f"[HTTP GET] URL={url} PARAMS={params}")
+
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.get(url, headers=_headers(), params=params)
 
+                logging.info(f"[HTTP GET] STATUS={r.status_code}")
+                logging.debug(f"[HTTP GET] RESPONSE={r.text[:400]}")
+
                 if 200 <= r.status_code < 300:
                     try:
                         return r.json()
                     except Exception:
-                        return {
-                            "error": "Invalid JSON from TN360",
-                            "response_text": r.text
-                        }
+                        return {"error": "Invalid JSON from TN360", "response_text": r.text}
 
                 return {"error": f"HTTP {r.status_code}", "response": r.text}
 
         except Exception as e:
+            logging.error(f"[HTTP GET] ERROR: {e}")
             if attempt == 2:
                 return {"error": str(e)}
             await asyncio.sleep(1.5 * (attempt + 1))
 
 
 # ============================================================================ #
-# POST WRAPPER (needed for DashCam requests)
+# POST WRAPPER (WITH LOGGING)
 # ============================================================================ #
 
 async def _post(path: str, payload: dict) -> dict:
     url = f"{TN360_BASE_URL}/v1{path}"
     timeout = httpx.Timeout(60.0)
 
+    logging.info(f"[HTTP POST] URL={url}")
+    logging.info(f"[HTTP POST] PAYLOAD={payload}")
+
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(url, headers=_headers(), json=payload)
 
+                logging.info(f"[HTTP POST] STATUS={r.status_code}")
+                logging.debug(f"[HTTP POST] RESPONSE={r.text[:400]}")
+
                 if 200 <= r.status_code < 300:
                     try:
                         return r.json()
                     except Exception:
-                        return {
-                            "error": "Invalid JSON from TN360",
-                            "response_text": r.text
-                        }
+                        return {"error": "Invalid JSON from TN360", "response_text": r.text}
 
                 return {"error": f"HTTP {r.status_code}", "response": r.text}
 
         except Exception as e:
+            logging.error(f"[HTTP POST] ERROR: {e}")
             if attempt == 2:
                 return {"error": str(e)}
             await asyncio.sleep(1.25 * (attempt + 1))
 
 
 # ============================================================================ #
-# PUT WRAPPER
+# PUT WRAPPER (WITH LOGGING)
 # ============================================================================ #
 
 async def _put(path: str, payload: dict) -> dict:
     url = f"{TN360_BASE_URL}/v1{path}"
     timeout = httpx.Timeout(60.0)
 
+    logging.info(f"[HTTP PUT] URL={url}")
+    logging.info(f"[HTTP PUT] PAYLOAD={payload}")
+
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.put(url, headers=_headers(), json=payload)
+
+            logging.info(f"[HTTP PUT] STATUS={r.status_code}")
+            logging.debug(f"[HTTP PUT] RESPONSE={r.text[:400]}")
+
             if 200 <= r.status_code < 300:
                 try:
                     return r.json()
                 except Exception:
                     return {"error": "Invalid JSON", "response_text": r.text}
+
             return {"error": f"HTTP {r.status_code}", "response": r.text}
 
     except Exception as e:
+        logging.error(f"[HTTP PUT] ERROR: {e}")
         return {"error": str(e)}
 
 
@@ -300,9 +316,6 @@ async def request_dashcam_video(
     start_timestamp: str,
     end_timestamp: str
 ) -> dict:
-    """
-    Requests dashcam video from TN360 for a time period.
-    """
 
     payload = {
         "startTimestamp": start_timestamp,
@@ -315,20 +328,12 @@ async def request_dashcam_video(
 
 @mcp.tool()
 async def get_dashcam_video_status(request_id: str) -> dict:
-    """
-    Polls TN360 for dashcam video request status.
-    Returns videoUrl when ready.
-    """
     result = await _get(f"/video/requests/{request_id}")
     return wrap_result(result)
 
 
 @mcp.tool()
 async def download_dashcam_video(request_id: str) -> dict:
-    """
-    Downloads dashcam video and returns base64-encoded bytes.
-    """
-
     status = await _get(f"/video/requests/{request_id}")
 
     if "error" in status:
@@ -395,6 +400,7 @@ async def update_geofence(
 
 async def health(request):
     return JSONResponse({"status": "ok"})
+
 
 async def oauth_metadata(request):
     return JSONResponse({
