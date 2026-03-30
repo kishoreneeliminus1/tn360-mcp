@@ -201,7 +201,7 @@ async def _put(path: str, payload: dict) -> dict:
 # MCP TOOLS
 # ============================================================================ #
 
-mcp.tool()
+@mcp.tool()
 async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
     params = {"fleetId": fleet_id} if fleet_id else {}
     return wrap_result(await _get("/vehicles", params))
@@ -220,13 +220,21 @@ async def get_events(
     vehicle_id: Optional[int] = None,
 ) -> dict:
 
+    # Default to last 6 days if no dates provided
     now = datetime.now(timezone.utc).replace(microsecond=0)
 
-    to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc) if to_date else now
-    from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc) if from_date else to_dt - timedelta(days=6)
+    if to_date:
+        to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc)
+    else:
+        to_dt = now
+
+    if from_date:
+        from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc)
+    else:
+        from_dt = to_dt - timedelta(days=6)
 
     params = {
-        "types": sanitize_event_types(event_types) or "camera,speed,position,gpio",
+        "types": sanitize_event_types(event_types) or "camera,speed",
         "from": from_dt.isoformat().replace("+00:00", "Z"),
         "to": to_dt.isoformat().replace("+00:00", "Z"),
         "pruning": "ALL",
@@ -248,7 +256,6 @@ async def get_users(status: str = "active") -> dict:
     params = {} if status == "all" else {"code": status}
     return wrap_result(await _get("/users", params))
 
-
 @mcp.tool()
 async def get_trips(
     vehicle_id: int,
@@ -258,8 +265,15 @@ async def get_trips(
 
     now = datetime.now(timezone.utc).date()
 
-    to_dt = datetime.fromisoformat(to_date).date() if to_date else now
-    from_dt = datetime.fromisoformat(from_date).date() if from_date else to_dt - timedelta(days=3)
+    if to_date:
+        to_dt = datetime.fromisoformat(to_date).date()
+    else:
+        to_dt = now
+
+    if from_date:
+        from_dt = datetime.fromisoformat(from_date).date()
+    else:
+        from_dt = to_dt - timedelta(days=6)
 
     params = {
         "from": from_dt.strftime("%Y-%m-%d"),
@@ -298,6 +312,43 @@ async def get_vehicle_within(vehicle_id: int) -> dict:
 async def get_vehicle_devices(vehicle_id: int) -> dict:
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/devices", {"pruning": "all"}))
 
+@mcp.tool()
+async def get_vehicle_images(vehicle_id: int) -> dict:
+    return wrap_result(await _get(f"/vehicles/{vehicle_id}/images"))
+
+
+
+
+@mcp.tool()
+async def get_vehicle_drivers(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    vehicle_id: Optional[int] = None,
+) -> dict:
+
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    if to_date:
+        to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc)
+    else:
+        to_dt = now
+
+    if from_date:
+        from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc)
+    else:
+        from_dt = to_dt - timedelta(days=3)
+
+    params = {
+        "types": "DRIVER",
+        "from": from_dt.isoformat().replace("+00:00", "Z"),
+        "to": to_dt.isoformat().replace("+00:00", "Z"),
+        "pruning": "ALL",
+    }
+
+    if vehicle_id:
+        params["vehicleId"] = vehicle_id
+
+    return wrap_result(await _get("/events", params))
 
 
 # (Other MCP tools unchanged for brevity, can rewrite if you want)
