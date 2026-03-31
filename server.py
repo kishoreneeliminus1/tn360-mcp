@@ -59,6 +59,7 @@ VALID_TN360_EVENT_TYPES = {
     "CAMERA",
     "GEOFENCE",
     "DRIVER",
+    "IGNITION",
     # Add others below only after confirming they are accepted by the TN360 API:
     # "HARSH_BRAKING", "HARSH_ACCELERATION", "HARSH_CORNERING",
     # "OVER_REVVING", "DRIVER_FATIGUE", "DRIVER_DISTRACTION", "SEATBELT_VIOLATION",
@@ -215,17 +216,173 @@ async def _put(path: str, payload: dict) -> dict:
 # MCP TOOLS
 # ============================================================================ #
 
+# ============================================================================ #
+# MCP TOOLS
+# ============================================================================ #
+
 @mcp.tool()
 async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
+    """
+    Fetch all vehicles in the fleet, optionally filtered by fleet_id.
+    Returns vehicle name, registration, type, status and associated IDs.
+    """
     params = {"fleetId": fleet_id} if fleet_id else {}
     return wrap_result(await _get("/vehicles", params))
 
 
-# FIX: get_vehicle_location removed — /vehicles/{id}/position returns HTTP 404
-# for all vehicles. The TN360 API does not appear to expose a live position
-# endpoint at this path. Use get_events with type=SPEED or GEOFENCE to derive
-# a vehicle's most recent position from event GPS coordinates instead.
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW: get_vehicle_stats
+# ─────────────────────────────────────────────────────────────────────────────
 
+@mcp.tool()
+async def get_vehicle_stats(
+    vehicle_id: Optional[int] = None,
+    embed_vehicles: bool = True,
+    last_updated: Optional[str] = None,
+) -> dict:
+    """
+    Fetch last-known GPS location for one or all vehicles using the
+    purpose-built /v1/vehicles/stats endpoint.
+
+    This is the PREFERRED method for "recent location" queries. It returns
+    each vehicle's last GPS fix (lat, lng, speed, direction, timestamp) in a
+    single lightweight call — far faster than pulling event streams and
+    filtering client-side.
+
+    Parameters
+    ──────────
+    vehicle_id:      Optional. Filter to a single vehicle by ID.
+                     Omit to get last-known location for the entire fleet.
+
+    embed_vehicles:  When True (default), the response includes the vehicle's
+                     name, registration, and other metadata alongside the GPS
+                     data. Set False for a minimal/faster payload when you
+                     only need coordinates.
+
+    last_updated:    ISO 8601 timestamp string (e.g. "2026-03-31T10:00:00Z").
+                     When provided, only vehicles whose GPS position has been
+                     updated SINCE this timestamp are returned. Use the most
+                     recent 'updatedAt' value from the previous response to
+                     implement efficient delta polling.
+                     Fair-use guideline: poll no more than once every 5 minutes.
+
+    Response fields (per vehicle)
+    ──────────────────────────────
+    GPS.Lat        — Latitude
+    GPS.Lng        — Longitude
+    GPS.Spd        — Speed (km/h)
+    GPS.Dir        — Heading (degrees)
+    GPS.Alt        — Altitude (metres)
+    GPS.NSat       — Satellites in use
+    GPS.valid      — Whether the GPS fix is valid
+    updatedAt      — Timestamp of the last GPS update (use for next poll)
+    vehicle.name   — Vehicle name (e.g. "RR13") — only if embed_vehicles=True
+    vehicle.registration — Rego plate — only if embed_vehicles=True
+
+    Example usage
+    ──────────────
+    # Single vehicle last location:
+    get_vehicle_stats(vehicle_id=62118)
+
+    # Full fleet snapshot:
+    get_vehicle_stats()
+
+    # Efficient delta poll (only vehicles that moved since last check):
+    get_vehicle_stats(last_updated="2026-03-31T10:00:00Z")
+    """
+    params: dict = {"gps": "true"}
+
+    if embed_vehicles:
+        params["embed"] = "vehicles"
+
+    if last_updated:
+        # Ensure the timestamp is URL-safe ISO 8601
+        try:
+            dt = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+            params["last_updated"] = dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            # Pass through as-is if parsing fails — let the API reject it
+            params["last_updated"] = last_updated
+
+    if vehicle_id:
+        params["vehicleId"] = vehicle_id
+
+    return wrap_result(await _get("/vehicles/stats", params))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NEW: get_vehicle_location
+# ─────────────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+async def get_vehicle_location(
+    vehicle_id: int,
+    hours_back: int = 6,
+) -> dict:
+    """
+    Get a vehicle's recent location from its GEOFENCE events using a tight
+    time window and single-vehicle filter.
+
+    Use this as a fallback when get_vehicle_stats() does not return data for
+    a vehicle (e.g. the device hasn't reported recently and falls outside the
+    stats window). GEOFENCE events carry GPS coordinates and are generated
+    whenever a vehicle enters or exits a monitored zone, making them a reliable
+    position source even when ignition/position events are unavailable.
+
+    This is significantly faster than a full fleet event query because:
+      • Only GEOFENCE type events are fetched (smallest event volume)
+      • Scoped to a single vehicle_id
+      • Time window defaults to 6 hours (not 3 days)
+
+    Parameters
+    ──────────
+    vehicle_id:   Required. The TN360 vehicle ID (integer).
+                  Use get_vehicles() to look up IDs by name/registration.
+
+    hours_back:   How many hours of history to search. Default 6.
+                  Increase to 24 if the vehicle hasn't moved recently
+                  (e.g. overnight or weekend). Max is 168 (7 days per API limit).
+
+    Response
+    ────────
+    Returns raw GEOFENCE events sorted most-recent-first. Each event includes:
+      GPS.Lat / GPS.Lng   — position at time of geofence trigger
+      GPS.Spd             — speed at trigger
+      location            — human-readable address string
+      timeAt              — UTC timestamp of the event
+      action              — GEO-EN (entered) or GEO-EX (exited)
+
+    Interpret the most recent event's GPS and location as the vehicle's last
+    known position.
+
+    Example usage
+    ──────────────
+    # Last 6 hours for RR13 (vehicle ID 62118):
+    get_vehicle_location(vehicle_id=62118)
+
+    # Last 24 hours for a vehicle that may have been parked overnight:
+    get_vehicle_location(vehicle_id=62118, hours_back=24)
+    """
+    hours_back = max(1, min(hours_back, 168))  # clamp: 1h–168h (7 days)
+
+    now = datetime.now(timezone.utc)
+    from_dt = now - timedelta(hours=hours_back)
+
+    params = {
+        "types": "GEOFENCE",
+        "from": from_dt.isoformat().replace("+00:00", "Z"),
+        "to": now.isoformat().replace("+00:00", "Z"),
+        "vehicleId": vehicle_id,
+        "pruning": "ALL",
+    }
+
+    logging.info(f"[get_vehicle_location] vehicle_id={vehicle_id} hours_back={hours_back}")
+    return wrap_result(await _get("/events", params))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXISTING: get_events (tightened default window + IGNITION support)
+# ─────────────────────────────────────────────────────────────────────────────
 
 @mcp.tool()
 async def get_events(
@@ -237,12 +394,33 @@ async def get_events(
     """
     Fetch vehicle events from TN360.
 
-    event_types: Comma-separated list of event types. Confirmed working values:
-                 SPEED, CAMERA, GEOFENCE, DRIVER
-                 Defaults to all confirmed-working types if not specified.
-    from_date:   ISO 8601 datetime string. Defaults to 6 days ago.
+    event_types: Comma-separated list of event types.
+                 Confirmed working: SPEED, CAMERA, GEOFENCE, DRIVER, IGNITION
+                 Defaults to SPEED,CAMERA,GEOFENCE,DRIVER if not specified.
+
+                 IGNITION events are especially useful for KM-driven queries:
+                 each event includes an `odometer` field, so today's distance =
+                 (last IGNITION OFF odometer) − (first IGNITION ON odometer).
+
+    from_date:   ISO 8601 datetime string. Defaults to 24 hours ago.
+                 (Previously defaulted to 3 days — tightened for performance.)
+
     to_date:     ISO 8601 datetime string. Defaults to now.
+
     vehicle_id:  Optional — filter to a specific vehicle.
+                 Always provide this when querying a single vehicle to
+                 dramatically reduce response size and API load.
+
+    Tips for faster results
+    ────────────────────────
+    • Always supply vehicle_id when you only need one vehicle's data.
+    • Use the most specific event_types list possible — avoid fetching all
+      types when you only need one (e.g. use "IGNITION" for KM queries,
+      "GEOFENCE" for location queries).
+    • For last-known location, prefer get_vehicle_stats() or
+      get_vehicle_location() over this tool.
+    • Keep date ranges as tight as possible — the API performs best with
+      narrow windows.
     """
     now = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -254,7 +432,8 @@ async def get_events(
     if from_date:
         from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc)
     else:
-        from_dt = to_dt - timedelta(days=3)
+        # IMPROVED: tightened from 3 days → 24 hours for better default performance
+        from_dt = to_dt - timedelta(hours=24)
 
     params = {
         "types": sanitize_event_types(event_types),
@@ -269,56 +448,68 @@ async def get_events(
     return wrap_result(await _get("/events", params))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# EXISTING TOOLS (unchanged)
+# ─────────────────────────────────────────────────────────────────────────────
+
 @mcp.tool()
 async def get_fleets() -> dict:
+    """Fetch all fleet groups defined in the TN360 account."""
     return wrap_result(await _get("/fleets"))
 
 
 @mcp.tool()
 async def get_users(status: str = "active") -> dict:
+    """
+    Fetch TN360 users. status='active' (default) or 'all'.
+    """
     params = {} if status == "all" else {"code": status}
     return wrap_result(await _get("/users", params))
 
 
-# FIX: get_trips removed — /vehicles/{id}/trips returns HTTP 404 for all
-# vehicles tested (P17, RR32, P114, P125). The trips endpoint either requires
-# a different API permission scope or is not available in this TN360 account.
-# Use get_events with type=GEOFENCE or DRIVER to reconstruct trip activity.
-
-
 @mcp.tool()
 async def get_geofences() -> dict:
+    """Fetch all geofence zones configured in the TN360 account."""
     return wrap_result(await _get("/geofences"))
 
 
 @mcp.tool()
 async def get_vehicle_odometer(vehicle_id: int) -> dict:
+    """
+    Fetch odometer, engine hours, distance, and battery meters for a vehicle.
+
+    The 'odometer' type entry shows the vehicle's total computed odometer.
+    The 'distance' type entry shows cumulative GPS-tracked distance.
+    The 'hours' type entry shows total engine hours.
+
+    For today's KM driven, prefer fetching IGNITION events via get_events()
+    and subtracting first-ON odometer from last-OFF odometer — more accurate
+    than differencing two meter snapshots taken at different times.
+    """
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/meters"))
 
 
 @mcp.tool()
 async def get_vehicle_users(vehicle_id: int) -> dict:
+    """Fetch users (drivers) associated with a specific vehicle."""
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/users"))
 
 
 @mcp.tool()
 async def get_vehicle_fleets(vehicle_id: int) -> dict:
+    """Fetch fleet group memberships for a specific vehicle."""
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/fleets"))
-
-
-# FIX: get_vehicle_within removed — the tool only accepted vehicle_id but a
-# proximity search requires latitude, longitude, and radius. Without those
-# parameters the tool always returned empty results and was not useful.
-# To re-enable this, add lat/lng/radius params and wire to the correct endpoint.
 
 
 @mcp.tool()
 async def get_vehicle_devices(vehicle_id: int) -> dict:
+    """Fetch telematics device(s) installed on a specific vehicle."""
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/devices", {"pruning": "all"}))
 
 
 @mcp.tool()
 async def get_vehicle_images(vehicle_id: int) -> dict:
+    """Fetch dashcam or inspection images associated with a specific vehicle."""
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/images"))
 
 
@@ -363,7 +554,7 @@ async def get_vehicle_drivers(
 
     return wrap_result(await _get("/events", params))
 
-
+    
 # ============================================================================ #
 # SYSTEM ROUTES
 # ============================================================================ #
