@@ -418,6 +418,10 @@ async def get_vehicle_images(vehicle_id: int) -> dict:
     """Fetch dashcam or inspection images associated with a specific vehicle."""
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/images"))
 
+@mcp.tool()
+async def get_vehicle_precheck(vehicle_id: int) -> dict:
+    return wrap_result(await _get(f"/vehicles/{vehicle_id}/checklist"))
+
 
 @mcp.tool()
 async def get_vehicle_drivers(
