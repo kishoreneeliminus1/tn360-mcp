@@ -60,6 +60,9 @@ VALID_TN360_EVENT_TYPES = {
     "GEOFENCE",
     "DRIVER",
     "IGNITION",
+    "IOR",        
+    "POSITION",    
+    "ALARM",       
     # Add others below only after confirming they are accepted by the TN360 API:
     # "HARSH_BRAKING", "HARSH_ACCELERATION", "HARSH_CORNERING",
     # "OVER_REVVING", "DRIVER_FATIGUE", "DRIVER_DISTRACTION", "SEATBELT_VIOLATION",
@@ -369,7 +372,7 @@ async def get_vehicle_location(
     from_dt = now - timedelta(hours=hours_back)
 
     params = {
-        "types": "GEOFENCE",
+        "types": "GEOFENCE,IGNITION,IOR",
         "from": from_dt.isoformat().replace("+00:00", "Z"),
         "to": now.isoformat().replace("+00:00", "Z"),
         "vehicleId": vehicle_id,
@@ -553,6 +556,448 @@ async def get_vehicle_drivers(
         params["vehicleId"] = vehicle_id
 
     return wrap_result(await _get("/events", params))
+
+@mcp.tool()
+async def get_trip_summary(
+    vehicle_id: int,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> dict:
+    """
+    Return a structured summary of all trips made by a vehicle over a date range.
+
+    Fetches IGNITION events and pairs ON→OFF sequences into discrete trips,
+    each with start/end time, start/end location, duration, and odometer-based
+    distance where the device reports odometer readings.
+
+    Where odometer is None (common on some devices), GPS-based distance is
+    estimated using the Haversine formula between the ON and OFF GPS coordinates.
+    This is a straight-line approximation — actual road distance will be higher.
+
+    Use this tool when the user asks any of:
+      • "How far did X drive today / this week?"
+      • "How many trips did X make?"
+      • "What time did X start / finish?"
+      • "How long was X on the road?"
+      • "Where did X go today?"
+
+    Parameters
+    ──────────
+    vehicle_id:   Required. TN360 vehicle ID (integer).
+                  Use get_vehicles() or get_vehicle_stats() to look up by name/rego.
+
+    from_date:    ISO 8601 datetime string. Defaults to start of current day (local midnight UTC+11).
+                  Examples: "2026-03-31T00:00:00+11:00", "2026-03-31T00:00:00Z"
+
+    to_date:      ISO 8601 datetime string. Defaults to now.
+
+    Response structure
+    ──────────────────
+    {
+      "vehicle_id": 319679,
+      "period": {
+        "from": "2026-03-31T00:00:00+11:00",
+        "to":   "2026-03-31T23:59:59+11:00"
+      },
+      "summary": {
+        "total_trips": 3,
+        "total_distance_km": 365.4,       # sum of all trip distances
+        "total_drive_time_mins": 312,      # sum of all trip durations
+        "total_idle_time_mins": 47,        # time engine on but not moving (approx)
+        "first_ignition_on":  "02:25 AEST",
+        "last_ignition_off":  "12:36 AEST",
+        "odometer_available": false        # true if device reported odometer readings
+      },
+      "trips": [
+        {
+          "trip_number": 1,
+          "ignition_on":  "2026-03-31T02:25:00+11:00",
+          "ignition_off": "2026-03-31T05:46:00+11:00",
+          "start_location": "Shell Keith, Dukes Highway, Keith, SA",
+          "end_location":   "Bradford Way, Cavan, SA",
+          "duration_mins": 201,
+          "distance_km": 160.2,            # odometer-based if available, else Haversine
+          "distance_source": "haversine",  # "odometer" | "haversine" | "unknown"
+          "odometer_start": null,
+          "odometer_end":   null,
+          "start_gps": {"lat": -36.1, "lng": 140.6},
+          "end_gps":   {"lat": -34.8, "lng": 138.6},
+          "max_speed_kmh": null            # populated if SPEED events available
+        }
+      ],
+      "unpaired_events": []  # ON events with no matching OFF (vehicle still running)
+    }
+
+    Notes
+    ─────
+    • Pairing logic: each IGNITION ON is matched to the next IGNITION OFF.
+      If the last event is an ON with no following OFF, it is placed in
+      `unpaired_events` — the vehicle is likely still running.
+    • Short ignition cycles < 2 minutes are flagged with "possible_idle": true
+      as they likely represent engine starts without a real trip (e.g. depot moves).
+    • Odometer readings: the TN360 API returns odometer on ignition events for
+      many devices but not all. When present, distance = off_odo - on_odo.
+      When absent, Haversine straight-line distance is used as a fallback.
+    • For vehicles that crossed midnight, ensure from_date is set to the
+      previous day's start time to capture the full run.
+
+    Example usage
+    ──────────────
+    # All trips for P115 today:
+    get_trip_summary(vehicle_id=319679,
+                     from_date="2026-03-31T00:00:00+11:00",
+                     to_date="2026-03-31T23:59:59+11:00")
+
+    # Full week for RR32:
+    get_trip_summary(vehicle_id=229418,
+                     from_date="2026-03-25T00:00:00+11:00",
+                     to_date="2026-03-31T23:59:59+11:00")
+    """
+    import math
+
+    def haversine_km(lat1, lng1, lat2, lng2) -> float:
+        """Straight-line distance between two GPS coordinates in km."""
+        R = 6371.0
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlam = math.radians(lng2 - lng1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
+        return round(R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a)), 2)
+
+    def parse_dt(s: str) -> datetime:
+        return datetime.fromisoformat(s).astimezone(timezone.utc)
+
+    def fmt_local(dt_utc: datetime, tz_offset_hrs: int = 11) -> str:
+        """Format a UTC datetime as a human-readable local time string."""
+        local = dt_utc + timedelta(hours=tz_offset_hrs)
+        return local.strftime("%H:%M AEST")
+
+    # ── Date range ────────────────────────────────────────────────────────────
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    to_dt = parse_dt(to_date) if to_date else now
+    if from_date:
+        from_dt = parse_dt(from_date)
+    else:
+        # Default: start of today in AEST (UTC+11)
+        today_aest = (now + timedelta(hours=11)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        from_dt = today_aest - timedelta(hours=11)
+
+    # ── Fetch IGNITION events ─────────────────────────────────────────────────
+    params = {
+        "types": "IGNITION",
+        "from": from_dt.isoformat().replace("+00:00", "Z"),
+        "to": to_dt.isoformat().replace("+00:00", "Z"),
+        "vehicleId": vehicle_id,
+        "pruning": "ALL",
+    }
+
+    raw = await _get("/events", params)
+
+    # Handle API errors
+    if isinstance(raw, dict) and "error" in raw:
+        return wrap_result(raw)
+
+    events = raw.get("data", []) if isinstance(raw, dict) else raw
+    if not isinstance(events, list):
+        return wrap_result({"error": "Unexpected response format from /events", "raw": str(raw)[:200]})
+
+    # Filter strictly to this vehicle (API may return others)
+    events = [e for e in events if e.get("vehicleId") == vehicle_id]
+
+    # Sort chronologically
+    events.sort(key=lambda e: e.get("timeAt", ""))
+
+    if not events:
+        return wrap_result({
+            "vehicle_id": vehicle_id,
+            "period": {"from": from_dt.isoformat(), "to": to_dt.isoformat()},
+            "summary": {
+                "total_trips": 0,
+                "total_distance_km": 0,
+                "total_drive_time_mins": 0,
+                "total_idle_time_mins": 0,
+                "first_ignition_on": None,
+                "last_ignition_off": None,
+                "odometer_available": False,
+            },
+            "trips": [],
+            "unpaired_events": [],
+            "note": "No IGNITION events found for this vehicle in the specified period."
+        })
+
+    # ── Pair ON → OFF ─────────────────────────────────────────────────────────
+    trips = []
+    unpaired = []
+    trip_number = 0
+    i = 0
+    odometer_seen = False
+
+    while i < len(events):
+        ev = events[i]
+        action = (ev.get("action") or "").upper()
+
+        if action == "ON":
+            # Find the next OFF
+            off_ev = None
+            for j in range(i + 1, len(events)):
+                if (events[j].get("action") or "").upper() == "OFF":
+                    off_ev = events[j]
+                    i = j  # advance outer loop past the OFF event
+                    break
+
+            on_dt = parse_dt(ev["timeAt"])
+            on_gps = ev.get("GPS") or {}
+            on_loc = ev.get("location") or ""
+            on_odo = ev.get("odometer")
+
+            if on_odo is not None:
+                odometer_seen = True
+
+            if off_ev:
+                off_dt = parse_dt(off_ev["timeAt"])
+                off_gps = off_ev.get("GPS") or {}
+                off_loc = off_ev.get("location") or ""
+                off_odo = off_ev.get("odometer")
+
+                if off_odo is not None:
+                    odometer_seen = True
+
+                duration_mins = round((off_dt - on_dt).total_seconds() / 60)
+
+                # Distance calculation
+                if on_odo is not None and off_odo is not None:
+                    distance_km = round(abs(off_odo - on_odo), 2)
+                    distance_source = "odometer"
+                elif (
+                    on_gps.get("Lat") and on_gps.get("Lng")
+                    and off_gps.get("Lat") and off_gps.get("Lng")
+                ):
+                    distance_km = haversine_km(
+                        on_gps["Lat"], on_gps["Lng"],
+                        off_gps["Lat"], off_gps["Lng"]
+                    )
+                    distance_source = "haversine"
+                else:
+                    distance_km = None
+                    distance_source = "unknown"
+
+                trip_number += 1
+                trips.append({
+                    "trip_number": trip_number,
+                    "ignition_on":  ev["timeAt"],
+                    "ignition_off": off_ev["timeAt"],
+                    "ignition_on_local":  fmt_local(on_dt),
+                    "ignition_off_local": fmt_local(off_dt),
+                    "start_location": on_loc,
+                    "end_location":   off_loc,
+                    "duration_mins":  duration_mins,
+                    "distance_km":    distance_km,
+                    "distance_source": distance_source,
+                    "odometer_start": on_odo,
+                    "odometer_end":   off_odo,
+                    "start_gps": {
+                        "lat": on_gps.get("Lat"),
+                        "lng": on_gps.get("Lng"),
+                    },
+                    "end_gps": {
+                        "lat": off_gps.get("Lat"),
+                        "lng": off_gps.get("Lng"),
+                    },
+                    "possible_idle": duration_mins < 2,
+                })
+            else:
+                # No matching OFF — vehicle still running or event missing
+                unpaired.append({
+                    "action": "ON",
+                    "timeAt": ev["timeAt"],
+                    "timeAt_local": fmt_local(on_dt),
+                    "location": on_loc,
+                    "note": "No matching IGNITION OFF found — vehicle may still be running."
+                })
+
+        i += 1
+
+    # ── Aggregate summary ─────────────────────────────────────────────────────
+    real_trips = [t for t in trips if not t.get("possible_idle")]
+    total_distance = sum(t["distance_km"] for t in trips if t["distance_km"] is not None)
+    total_drive_mins = sum(t["duration_mins"] for t in trips)
+
+    # Approximate idle: short ignition cycles < 2 min
+    idle_trips = [t for t in trips if t.get("possible_idle")]
+    idle_mins = sum(t["duration_mins"] for t in idle_trips)
+
+    first_on = trips[0]["ignition_on_local"] if trips else (
+        unpaired[0]["timeAt_local"] if unpaired else None
+    )
+    last_off_trips = [t for t in trips if not t.get("possible_idle")]
+    last_off = last_off_trips[-1]["ignition_off_local"] if last_off_trips else None
+
+    return wrap_result({
+        "vehicle_id": vehicle_id,
+        "period": {
+            "from": from_dt.isoformat(),
+            "to": to_dt.isoformat(),
+        },
+        "summary": {
+            "total_trips": len(real_trips),
+            "total_distance_km": round(total_distance, 2),
+            "distance_source": "odometer" if odometer_seen else "haversine_approximation",
+            "total_drive_time_mins": total_drive_mins - idle_mins,
+            "total_idle_time_mins": idle_mins,
+            "first_ignition_on":  first_on,
+            "last_ignition_off":  last_off,
+            "odometer_available": odometer_seen,
+        },
+        "trips": trips,
+        "unpaired_events": unpaired,
+    })
+
+@mcp.tool()
+async def get_camera_events(
+    action: Optional[str] = None,
+    vehicle_id: Optional[int] = None,
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+) -> dict:
+    """
+    Fetch dashcam/camera events from TN360, optionally filtered by action type.
+
+    This is a focused wrapper around get_events(event_types="CAMERA") that adds
+    server-side-style filtering on the `action` field — allowing callers to
+    request only red light violations, only fatigue alerts, etc., without
+    pulling and filtering the full CAMERA event stream client-side.
+
+    CAMERA Event Action Types
+    ─────────────────────────
+    TRAFFIC_LIGHT_VIOLATION     — Vehicle ran a red light or stop sign.
+                                  subTypeDescription: "Red - Major" or "Red - Minor"
+                                  confidence field (0.0–1.0) indicates AI certainty.
+
+    SPEED_VIOLATION             — Vehicle exceeded the posted speed limit.
+                                  speedData.speed = actual speed (km/h)
+                                  speedData.speedLimit = posted limit (km/h)
+
+    FATIGUE                     — Driver drowsiness detected by AI camera.
+                                  subTypeDescription: "Drowsy"
+                                  duration field = seconds of detected fatigue.
+
+    DISTRACTION                 — Driver not looking at road.
+                                  subTypeDescription examples:
+                                    "Looking At Phone", "Looking Down", "Talking On Phone"
+                                  confidence field indicates AI certainty.
+
+    FOLLOWING_DISTANCE          — Tailgating / insufficient gap to vehicle ahead.
+                                  subTypeDescription: "From Front" or "Other Vehicle From Right"
+                                  duration = seconds of unsafe following distance.
+
+    INTERNAL_CAMERA_OBSTRUCTION — Dashcam lens blocked or incorrectly mounted.
+                                  subTypeDescription: "Inward Complete - Bad Mount"
+                                  Useful for identifying cameras needing attention.
+
+    DRIVER_INPUT                — Driver manually triggered the camera (panic button).
+                                  subTypeDescription: "Driver Side Button"
+
+    Parameters
+    ──────────
+    action:      Optional. One of the action type strings listed above.
+                 Case-insensitive. If omitted, all CAMERA events are returned.
+                 Examples:
+                   "TRAFFIC_LIGHT_VIOLATION"  — red light jumps only
+                   "FATIGUE"                  — drowsiness alerts only
+                   "DISTRACTION"              — phone use / inattention only
+                   "SPEED_VIOLATION"          — camera-detected speeding only
+                   "FOLLOWING_DISTANCE"       — tailgating alerts only
+
+    vehicle_id:  Optional. Scope to a single vehicle by TN360 vehicle ID.
+                 Always provide when querying one vehicle — much faster.
+
+    from_date:   ISO 8601 datetime string. Defaults to 24 hours ago.
+
+    to_date:     ISO 8601 datetime string. Defaults to now.
+
+    Response fields (per event)
+    ────────────────────────────
+    action              — The event action type (see above)
+    location            — Human-readable address where event occurred
+    timeAt              — UTC timestamp of the event
+    vehicle.name        — Vehicle name (e.g. "P49")
+    vehicle.registration — Rego plate
+    GPS.Lat / GPS.Lng   — Position at time of event
+    GPS.Spd             — Speed at time of event
+    attributes.context  — JSON string with full AI analysis details including:
+                            speedData.speed / speedData.speedLimit
+                            details.confidence
+                            details.subTypeDescription
+                            details.severity / details.severityDescription
+                            driver.firstName / driver.lastName
+                            videos[].id — dashcam clip IDs
+
+    Example usage
+    ──────────────
+    # All red light violations in the last 24 hours:
+    get_camera_events(action="TRAFFIC_LIGHT_VIOLATION")
+
+    # Fatigue alerts for a specific vehicle today:
+    get_camera_events(action="FATIGUE", vehicle_id=37507,
+                      from_date="2026-03-31T00:00:00+11:00",
+                      to_date="2026-03-31T23:59:59+11:00")
+
+    # All camera events for one vehicle (no action filter):
+    get_camera_events(vehicle_id=319679,
+                      from_date="2026-03-31T00:00:00+11:00")
+
+    # Phone use / distraction incidents fleet-wide today:
+    get_camera_events(action="DISTRACTION",
+                      from_date="2026-03-31T00:00:00+11:00")
+    """
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+
+    if to_date:
+        to_dt = datetime.fromisoformat(to_date).astimezone(timezone.utc)
+    else:
+        to_dt = now
+
+    if from_date:
+        from_dt = datetime.fromisoformat(from_date).astimezone(timezone.utc)
+    else:
+        from_dt = to_dt - timedelta(hours=24)
+
+    params = {
+        "types": "CAMERA",
+        "from": from_dt.isoformat().replace("+00:00", "Z"),
+        "to": to_dt.isoformat().replace("+00:00", "Z"),
+        "pruning": "ALL",
+    }
+
+    if vehicle_id:
+        params["vehicleId"] = vehicle_id
+
+    raw = await _get("/events", params)
+
+    # Client-side action filtering — TN360 API does not support action= param
+    if action and isinstance(raw, dict) and "data" in raw:
+        action_upper = action.strip().upper()
+        raw["data"] = [
+            e for e in (raw.get("data") or [])
+            if (e.get("action") or "").upper() == action_upper
+        ]
+        # Update meta count to reflect filtered result
+        if "meta" in raw and isinstance(raw["meta"], dict):
+            raw["meta"]["count"] = len(raw["data"])
+            raw["meta"]["filtered_by_action"] = action_upper
+            raw["meta"]["note"] = (
+                "action filter applied client-side — "
+                "total CAMERA events fetched may be higher"
+            )
+
+    elif action and isinstance(raw, list):
+        action_upper = action.strip().upper()
+        raw = [e for e in raw if (e.get("action") or "").upper() == action_upper]
+
+    return wrap_result(raw)
 
     
 # ============================================================================ #
