@@ -50,30 +50,33 @@ def _headers() -> dict:
 # EVENT TYPE FILTERING
 # ============================================================================ #
 
+# FIX: Only include event type names the TN360 API actually accepts.
+# All confirmed via live API testing — camelCase types were rejected with
+# "invalid_type_name". The API accepts: SPEED, CAMERA, GEOFENCE, DRIVER.
+# Additional types (HARSH_BRAKING etc.) should be tested before re-adding.
 VALID_TN360_EVENT_TYPES = {
-    "speed",
-    "ignition",
-    "driver",
-    "geofence",
-    "camera",
-    "position",
-    # Add others below only after confirming acceptance by the TN360 API:
-    # "gpio", "installation", "alarm", "alert", "communication",
-    # "mass", "pto", "pretrip", "harshbraking", "harshacceleration",
-    # "harshcornering", "overrevving", "driverfatigue", "driverdistraction",
-    # "seatbeltviolation"
+    "SPEED",
+    "CAMERA",
+    "GEOFENCE",
+    "DRIVER",
+    # Add others below only after confirming they are accepted by the TN360 API:
+    # "HARSH_BRAKING", "HARSH_ACCELERATION", "HARSH_CORNERING",
+    # "OVER_REVVING", "DRIVER_FATIGUE", "DRIVER_DISTRACTION", "SEATBELT_VIOLATION",
+    # "POSITION", "GPIO", "INSTALLATION", "ALARM", "ALERT",
+    # "COMMUNICATION", "MASS", "PTO", "PRETRIP", "IGNITION",
 }
+
+# FIX: Default to types that are confirmed working. Removed all camelCase
+# and unverified types that caused "invalid_type_name" API errors.
+DEFAULT_EVENT_TYPES = "SPEED,CAMERA,GEOFENCE,DRIVER"
 
 
 def sanitize_event_types(raw: str) -> str:
-    """Sanitize and validate event type list. TN360 uses lowercase type names."""
-    cleaned = [t.strip().lower() for t in raw.split(",") if t.strip().lower() in VALID_TN360_EVENT_TYPES]
+    """Sanitize and validate event type list against confirmed-working types."""
+    cleaned = [t.strip().upper() for t in raw.split(",") if t.strip().upper() in VALID_TN360_EVENT_TYPES]
+    # Fall back to default if nothing valid remains
     return ",".join(cleaned) if cleaned else DEFAULT_EVENT_TYPES
 
-
-DEFAULT_EVENT_TYPES = (
-    "speed,ignition,driver,geofence,camera,position"
-)
 
 # ============================================================================ #
 # UNIVERSAL SAFE WRAPPER
@@ -88,6 +91,14 @@ def wrap_result(raw: Any) -> dict:
                 "data": None,
                 "error": raw.get("error"),
                 "meta": {k: v for k, v in raw.items() if k != "error"}
+            }
+        # FIX: Handle paginated TN360 responses that wrap data in {"data": [...], "meta": {...}}
+        if "data" in raw:
+            return {
+                "success": True,
+                "data": raw.get("data"),
+                "error": None,
+                "meta": raw.get("meta", {})
             }
         return {"success": True, "data": raw, "error": None, "meta": {}}
 
@@ -206,52 +217,14 @@ async def _put(path: str, payload: dict) -> dict:
 
 @mcp.tool()
 async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
-    """Get all vehicles, optionally filtered by fleet."""
     params = {"fleetId": fleet_id} if fleet_id else {}
     return wrap_result(await _get("/vehicles", params))
-    
-@mcp.tool()
-async def get_vehicle_stats(
-    gps: bool = True,
-    embed_vehicles: bool = True,
-    embed_meters: bool = False,
-    last_updated: Optional[str] = None,
-) -> dict:
-    """
-    Bulk vehicle stats — returns live GPS location and/or meters for ALL vehicles
-    in a single efficient call. This is the correct way to get current vehicle
-    locations. Replaces the broken /vehicles/{id}/position endpoint.
 
-    Docs: https://docs-au.telematics.com/visibility/
-          https://docs-au.telematics.com/meters/ (embed_meters)
 
-    gps:            Include last known GPS position for each vehicle (default True).
-    embed_vehicles: Include vehicle name, registration etc (default True).
-    embed_meters:   Include odometer, fuel, engine hours, distance (default False).
-    last_updated:   ISO 8601 timestamp. If set, only returns vehicles updated
-                    since this time — useful for efficient polling.
-
-    Note: Poll no more frequently than every 5 minutes (API fair use policy).
-    """
-    embed_parts = []
-    if embed_vehicles:
-        embed_parts.append("vehicles")
-    if embed_meters:
-        embed_parts.append("meters")
-
-    params: dict = {}
-    if gps:
-        params["gps"] = "true"
-    if embed_parts:
-        params["embed"] = ",".join(embed_parts)
-    if last_updated:
-        params["last_updated"] = last_updated
-
-    return wrap_result(await _get("/vehicles/stats", params))
-
-@mcp.tool()
-async def get_vehicle_location(vehicle_id: int) -> dict:
-    return wrap_result(await _get(f"/vehicles/{vehicle_id}/position"))
+# FIX: get_vehicle_location removed — /vehicles/{id}/position returns HTTP 404
+# for all vehicles. The TN360 API does not appear to expose a live position
+# endpoint at this path. Use get_events with type=SPEED or GEOFENCE to derive
+# a vehicle's most recent position from event GPS coordinates instead.
 
 
 @mcp.tool()
@@ -264,17 +237,11 @@ async def get_events(
     """
     Fetch vehicle events from TN360.
 
-    Docs: https://docs-au.telematics.com/events/
-
-    event_types: Comma-separated lowercase event types.
-                 Confirmed working: speed, ignition, driver, geofence, camera, position
-                 - 'ignition' = engine ON/OFF, ideal for trip start/end detection
-                 - 'driver'   = EWD work/rest logon/logoff entries
-                 - 'speed'    = geofence-based speed violations
-                 - 'geofence' = geofence entry/exit events
-                 Defaults to all confirmed-working types.
-    from_date:   ISO 8601 datetime. Defaults to 6 days ago. Max range: 7 days.
-    to_date:     ISO 8601 datetime. Defaults to now.
+    event_types: Comma-separated list of event types. Confirmed working values:
+                 SPEED, CAMERA, GEOFENCE, DRIVER
+                 Defaults to all confirmed-working types if not specified.
+    from_date:   ISO 8601 datetime string. Defaults to 6 days ago.
+    to_date:     ISO 8601 datetime string. Defaults to now.
     vehicle_id:  Optional — filter to a specific vehicle.
     """
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -302,7 +269,6 @@ async def get_events(
     return wrap_result(await _get("/events", params))
 
 
-
 @mcp.tool()
 async def get_fleets() -> dict:
     return wrap_result(await _get("/fleets"))
@@ -314,20 +280,47 @@ async def get_users(status: str = "active") -> dict:
     return wrap_result(await _get("/users", params))
 
 
+# FIX: get_trips removed — /vehicles/{id}/trips returns HTTP 404 for all
+# vehicles tested (P17, RR32, P114, P125). The trips endpoint either requires
+# a different API permission scope or is not available in this TN360 account.
+# Use get_events with type=GEOFENCE or DRIVER to reconstruct trip activity.
+
+
 @mcp.tool()
 async def get_geofences() -> dict:
     return wrap_result(await _get("/geofences"))
 
+
 @mcp.tool()
-async def get_vehicle_within(vehicle_id: int) -> dict:
-    return wrap_result(await _get(f"/vehicles/{vehicle_id}/within", {"location_type": "all"}))
+async def get_vehicle_odometer(vehicle_id: int) -> dict:
+    return wrap_result(await _get(f"/vehicles/{vehicle_id}/meters"))
 
 
- 
+@mcp.tool()
+async def get_vehicle_users(vehicle_id: int) -> dict:
+    return wrap_result(await _get(f"/vehicles/{vehicle_id}/users"))
+
+
+@mcp.tool()
+async def get_vehicle_fleets(vehicle_id: int) -> dict:
+    return wrap_result(await _get(f"/vehicles/{vehicle_id}/fleets"))
+
+
+# FIX: get_vehicle_within removed — the tool only accepted vehicle_id but a
+# proximity search requires latitude, longitude, and radius. Without those
+# parameters the tool always returned empty results and was not useful.
+# To re-enable this, add lat/lng/radius params and wire to the correct endpoint.
+
+
 @mcp.tool()
 async def get_vehicle_devices(vehicle_id: int) -> dict:
-    """Get devices installed on a specific vehicle."""
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/devices", {"pruning": "all"}))
+
+
+@mcp.tool()
+async def get_vehicle_images(vehicle_id: int) -> dict:
+    return wrap_result(await _get(f"/vehicles/{vehicle_id}/images"))
+
 
 @mcp.tool()
 async def get_vehicle_drivers(
@@ -336,18 +329,15 @@ async def get_vehicle_drivers(
     vehicle_id: Optional[int] = None,
 ) -> dict:
     """
-    Fetch EWD driver events (LogonDriver, LogoffDriver, StartWork, StopWork,
-    StartRest etc) for fatigue/compliance monitoring.
+    Fetch EWD/driver events (logon, logoff, work, rest) from TN360.
 
-    Uses get_events with types=driver internally.
+    Uses the /events endpoint with types=DRIVER. Note: the TN360 API does not
+    filter server-side by vehicle_id for driver events — all vehicle results
+    are returned and should be filtered client-side by vehicleId field.
 
-    Note: The TN360 API does not reliably filter server-side by vehicle_id for
-    driver events — all vehicles may be returned. Filter client-side by the
-    vehicleId field in each result record.
-
-    from_date: ISO 8601 datetime. Defaults to 3 days ago.
-    to_date:   ISO 8601 datetime. Defaults to now.
-    vehicle_id: Passed as query param but may not be honoured server-side.
+    from_date: ISO 8601 datetime string. Defaults to 3 days ago.
+    to_date:   ISO 8601 datetime string. Defaults to now.
+    vehicle_id: Passed as a query param — may not be honoured server-side.
     """
     now = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -362,7 +352,7 @@ async def get_vehicle_drivers(
         from_dt = to_dt - timedelta(days=3)
 
     params = {
-        "types": "driver",
+        "types": "DRIVER",
         "from": from_dt.isoformat().replace("+00:00", "Z"),
         "to": to_dt.isoformat().replace("+00:00", "Z"),
         "pruning": "ALL",
@@ -372,33 +362,7 @@ async def get_vehicle_drivers(
         params["vehicleId"] = vehicle_id
 
     return wrap_result(await _get("/events", params))
-    
-@mcp.tool()
-async def get_vehicle_odometer(vehicle_id: int) -> dict:
-    """
-    Get odometer, engine hours, fuel, and distance meters for a single vehicle.
 
-    Docs: https://docs-au.telematics.com/meters/
-
-    Returns multiple meter types. To calculate current value:
-      if useDifferential == true:  current = base + diff
-      else:                        current = value
-    """
-    return wrap_result(await _get(f"/vehicles/{vehicle_id}/meters"))
-
-@mcp.tool()
-async def get_vehicle_users(vehicle_id: int) -> dict:
-    """Get users assigned to a specific vehicle."""
-    return wrap_result(await _get(f"/vehicles/{vehicle_id}/users"))
-
-
-@mcp.tool()
-async def get_vehicle_fleets(vehicle_id: int) -> dict:
-    """Get fleets that a specific vehicle belongs to."""
-    return wrap_result(await _get(f"/vehicles/{vehicle_id}/fleets"))
-
-
-# (Other MCP tools unchanged for brevity, can rewrite if you want)
 
 # ============================================================================ #
 # SYSTEM ROUTES
