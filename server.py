@@ -32,6 +32,7 @@ logging.basicConfig(
 
 TN360_BASE_URL = os.environ.get("TN360_BASE_URL", "https://api-au.telematics.com")
 TN360_API_KEY = os.environ.get("TN360_API_KEY", "")
+SERVER_BASE_URL = os.environ.get("SERVER_BASE_URL", "https://tn360-mcp.onrender.com")
 
 
 def _headers() -> dict:
@@ -186,31 +187,34 @@ async def _post(path: str, payload: dict) -> dict:
 # ============================================================================ #
 
 async def _put(path: str, payload: dict) -> dict:
-    """Generic PUT wrapper."""
+    """Generic PUT wrapper with retry (consistent with _get/_post)."""
     url = f"{TN360_BASE_URL}/v1{path}"
     timeout = httpx.Timeout(60.0)
 
     logging.info(f"[HTTP PUT] URL={url}")
     logging.info(f"[HTTP PUT] PAYLOAD={payload}")
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.put(url, headers=_headers(), json=payload)
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.put(url, headers=_headers(), json=payload)
 
-            logging.info(f"[HTTP PUT] STATUS={r.status_code}")
-            logging.debug(f"[HTTP PUT] RESPONSE={r.text[:400]}")
+                logging.info(f"[HTTP PUT] STATUS={r.status_code}")
+                logging.debug(f"[HTTP PUT] RESPONSE={r.text[:400]}")
 
-            if 200 <= r.status_code < 300:
-                try:
-                    return r.json()
-                except Exception:
-                    return {"error": "Invalid JSON", "response_text": r.text}
+                if 200 <= r.status_code < 300:
+                    try:
+                        return r.json()
+                    except Exception:
+                        return {"error": "Invalid JSON", "response_text": r.text}
 
-            return {"error": f"HTTP {r.status_code}", "response": r.text}
+                return {"error": f"HTTP {r.status_code}", "response": r.text}
 
-    except Exception as e:
-        logging.error(f"[HTTP PUT] ERROR: {e}")
-        return {"error": str(e)}
+        except Exception as e:
+            logging.error(f"[HTTP PUT] ERROR: {e}")
+            if attempt == 2:
+                return {"error": str(e)}
+            await asyncio.sleep(1.25 * (attempt + 1))
 
 # ============================================================================ #
 # MCP TOOLS
@@ -433,10 +437,75 @@ async def health(request):
     return JSONResponse({"status": "ok"})
 
 
-async def oauth_metadata(request):
+async def oauth_authorization_server(request):
+    """
+    RFC 8414 OAuth 2.0 Authorization Server Metadata.
+    Includes registration_endpoint so MCP clients attempting dynamic client
+    registration (RFC 7591) see the correct endpoint rather than 404-ing.
+    grant_types_supported / token_endpoint_auth_methods_supported signal that
+    this server uses client_credentials with no secret (public client), which
+    is the correct posture for an MCP server using API-key auth internally.
+    """
+    base = SERVER_BASE_URL
     return JSONResponse({
-        "issuer": "https://tn360-mcp.onrender.com",
+        "issuer": base,
+        "authorization_endpoint": f"{base}/authorize",
+        "token_endpoint": f"{base}/token",
+        "registration_endpoint": f"{base}/register",
         "response_types_supported": ["token"],
+        "grant_types_supported": ["client_credentials"],
+        "token_endpoint_auth_methods_supported": ["none"],
+        "scopes_supported": ["mcp"],
+    })
+
+
+async def oauth_protected_resource(request):
+    """
+    RFC 9728 OAuth 2.0 Protected Resource Metadata.
+    MCP clients probe this path first to discover which authorization server
+    protects the resource. Without it they fall through to 404 → connection
+    failure. Both the bare path and the /mcp sub-path are handled by the same
+    route via Starlette path matching.
+    """
+    base = SERVER_BASE_URL
+    return JSONResponse({
+        "resource": base,
+        "authorization_servers": [base],
+        "scopes_supported": ["mcp"],
+        "bearer_methods_supported": ["header"],
+    })
+
+
+async def oauth_register(request):
+    """
+    RFC 7591 Dynamic Client Registration stub.
+    MCP clients (including Claude.ai) POST here expecting a client_id back.
+    Returning a static public client_id satisfies the handshake without
+    requiring real credential issuance, since auth is handled by the TN360
+    API key server-side.
+    """
+    return JSONResponse(
+        {
+            "client_id": "tn360-mcp-public",
+            "client_name": "TN360 MCP Client",
+            "grant_types": ["client_credentials"],
+            "token_endpoint_auth_method": "none",
+        },
+        status_code=201,
+    )
+
+
+async def oauth_token(request):
+    """
+    Token endpoint stub.
+    Returns a dummy bearer token. Actual auth to TN360 is performed via the
+    TN360_API_KEY environment variable on every outbound request, so this
+    token is never forwarded to the upstream API.
+    """
+    return JSONResponse({
+        "access_token": "tn360-mcp-passthrough",
+        "token_type": "bearer",
+        "expires_in": 86400,
     })
 
 # ============================================================================ #
@@ -449,7 +518,15 @@ app = Starlette(
     lifespan=mcp_app.lifespan,
     routes=[
         Route("/health", health),
-        Route("/.well-known/oauth-authorization-server", oauth_metadata),
+        # OAuth discovery — both paths that MCP clients probe (RFC 9728)
+        Route("/.well-known/oauth-protected-resource", oauth_protected_resource),
+        Route("/.well-known/oauth-protected-resource/mcp", oauth_protected_resource),
+        # Authorization server metadata (RFC 8414) — was already present but incomplete
+        Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
+        # Dynamic client registration stub (RFC 7591) — was 404, now returns 201
+        Route("/register", oauth_register, methods=["POST"]),
+        # Token endpoint stub
+        Route("/token", oauth_token, methods=["POST"]),
         Mount("/", app=mcp_app),
     ],
 )
