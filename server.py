@@ -50,27 +50,33 @@ def _headers() -> dict:
 # EVENT TYPE FILTERING
 # ============================================================================ #
 
+# FIX: Only include event type names the TN360 API actually accepts.
+# All confirmed via live API testing — camelCase types were rejected with
+# "invalid_type_name". The API accepts: SPEED, CAMERA, GEOFENCE, DRIVER.
+# Additional types (HARSH_BRAKING etc.) should be tested before re-adding.
 VALID_TN360_EVENT_TYPES = {
-    "ignition", "speed", "position", "geofence", "camera",
-    "gpio", "installation", "alarm", "alert", "communication",
-    "mass", "pto", "pretrip",
-    "harshBraking", "harshAcceleration", "harshCornering",
-    "overRevving", "driverFatigue", "driverDistraction",
-    "seatbeltViolation",
+    "SPEED",
+    "CAMERA",
+    "GEOFENCE",
+    "DRIVER",
+    # Add others below only after confirming they are accepted by the TN360 API:
+    # "HARSH_BRAKING", "HARSH_ACCELERATION", "HARSH_CORNERING",
+    # "OVER_REVVING", "DRIVER_FATIGUE", "DRIVER_DISTRACTION", "SEATBELT_VIOLATION",
+    # "POSITION", "GPIO", "INSTALLATION", "ALARM", "ALERT",
+    # "COMMUNICATION", "MASS", "PTO", "PRETRIP", "IGNITION",
 }
+
+# FIX: Default to types that are confirmed working. Removed all camelCase
+# and unverified types that caused "invalid_type_name" API errors.
+DEFAULT_EVENT_TYPES = "SPEED,CAMERA,GEOFENCE,DRIVER"
 
 
 def sanitize_event_types(raw: str) -> str:
-    """Sanitize and validate event type list."""
-    cleaned = [t.strip() for t in raw.split(",") if t.strip() in VALID_TN360_EVENT_TYPES]
-    return ",".join(cleaned)
+    """Sanitize and validate event type list against confirmed-working types."""
+    cleaned = [t.strip().upper() for t in raw.split(",") if t.strip().upper() in VALID_TN360_EVENT_TYPES]
+    # Fall back to default if nothing valid remains
+    return ",".join(cleaned) if cleaned else DEFAULT_EVENT_TYPES
 
-
-DEFAULT_EVENT_TYPES = (
-    "speed,position,geofence,camera,gpio,installation,alarm,alert,"
-    "communication,mass,pto,pretrip,harshBraking,harshAcceleration,"
-    "harshCornering,overRevving,driverFatigue,driverDistraction,seatbeltViolation"
-)
 
 # ============================================================================ #
 # UNIVERSAL SAFE WRAPPER
@@ -85,6 +91,14 @@ def wrap_result(raw: Any) -> dict:
                 "data": None,
                 "error": raw.get("error"),
                 "meta": {k: v for k, v in raw.items() if k != "error"}
+            }
+        # FIX: Handle paginated TN360 responses that wrap data in {"data": [...], "meta": {...}}
+        if "data" in raw:
+            return {
+                "success": True,
+                "data": raw.get("data"),
+                "error": None,
+                "meta": raw.get("meta", {})
             }
         return {"success": True, "data": raw, "error": None, "meta": {}}
 
@@ -207,9 +221,10 @@ async def get_vehicles(fleet_id: Optional[int] = None) -> dict:
     return wrap_result(await _get("/vehicles", params))
 
 
-@mcp.tool()
-async def get_vehicle_location(vehicle_id: int) -> dict:
-    return wrap_result(await _get(f"/vehicles/{vehicle_id}/position"))
+# FIX: get_vehicle_location removed — /vehicles/{id}/position returns HTTP 404
+# for all vehicles. The TN360 API does not appear to expose a live position
+# endpoint at this path. Use get_events with type=SPEED or GEOFENCE to derive
+# a vehicle's most recent position from event GPS coordinates instead.
 
 
 @mcp.tool()
@@ -219,8 +234,16 @@ async def get_events(
     to_date: Optional[str] = None,
     vehicle_id: Optional[int] = None,
 ) -> dict:
+    """
+    Fetch vehicle events from TN360.
 
-    # Default to last 6 days if no dates provided
+    event_types: Comma-separated list of event types. Confirmed working values:
+                 SPEED, CAMERA, GEOFENCE, DRIVER
+                 Defaults to all confirmed-working types if not specified.
+    from_date:   ISO 8601 datetime string. Defaults to 6 days ago.
+    to_date:     ISO 8601 datetime string. Defaults to now.
+    vehicle_id:  Optional — filter to a specific vehicle.
+    """
     now = datetime.now(timezone.utc).replace(microsecond=0)
 
     if to_date:
@@ -234,7 +257,7 @@ async def get_events(
         from_dt = to_dt - timedelta(days=6)
 
     params = {
-        "types": sanitize_event_types(event_types) or "camera,speed",
+        "types": sanitize_event_types(event_types),
         "from": from_dt.isoformat().replace("+00:00", "Z"),
         "to": to_dt.isoformat().replace("+00:00", "Z"),
         "pruning": "ALL",
@@ -256,31 +279,11 @@ async def get_users(status: str = "active") -> dict:
     params = {} if status == "all" else {"code": status}
     return wrap_result(await _get("/users", params))
 
-@mcp.tool()
-async def get_trips(
-    vehicle_id: int,
-    from_date: Optional[str] = None,
-    to_date: Optional[str] = None,
-) -> dict:
 
-    now = datetime.now(timezone.utc).date()
-
-    if to_date:
-        to_dt = datetime.fromisoformat(to_date).date()
-    else:
-        to_dt = now
-
-    if from_date:
-        from_dt = datetime.fromisoformat(from_date).date()
-    else:
-        from_dt = to_dt - timedelta(days=6)
-
-    params = {
-        "from": from_dt.strftime("%Y-%m-%d"),
-        "to": to_dt.strftime("%Y-%m-%d"),
-    }
-
-    return wrap_result(await _get(f"/vehicles/{vehicle_id}/trips", params))
+# FIX: get_trips removed — /vehicles/{id}/trips returns HTTP 404 for all
+# vehicles tested (P17, RR32, P114, P125). The trips endpoint either requires
+# a different API permission scope or is not available in this TN360 account.
+# Use get_events with type=GEOFENCE or DRIVER to reconstruct trip activity.
 
 
 @mcp.tool()
@@ -303,20 +306,20 @@ async def get_vehicle_fleets(vehicle_id: int) -> dict:
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/fleets"))
 
 
-@mcp.tool()
-async def get_vehicle_within(vehicle_id: int) -> dict:
-    return wrap_result(await _get(f"/vehicles/{vehicle_id}/within", {"location_type": "all"}))
+# FIX: get_vehicle_within removed — the tool only accepted vehicle_id but a
+# proximity search requires latitude, longitude, and radius. Without those
+# parameters the tool always returned empty results and was not useful.
+# To re-enable this, add lat/lng/radius params and wire to the correct endpoint.
 
 
 @mcp.tool()
 async def get_vehicle_devices(vehicle_id: int) -> dict:
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/devices", {"pruning": "all"}))
 
+
 @mcp.tool()
 async def get_vehicle_images(vehicle_id: int) -> dict:
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/images"))
-
-
 
 
 @mcp.tool()
@@ -325,7 +328,17 @@ async def get_vehicle_drivers(
     to_date: Optional[str] = None,
     vehicle_id: Optional[int] = None,
 ) -> dict:
+    """
+    Fetch EWD/driver events (logon, logoff, work, rest) from TN360.
 
+    Uses the /events endpoint with types=DRIVER. Note: the TN360 API does not
+    filter server-side by vehicle_id for driver events — all vehicle results
+    are returned and should be filtered client-side by vehicleId field.
+
+    from_date: ISO 8601 datetime string. Defaults to 3 days ago.
+    to_date:   ISO 8601 datetime string. Defaults to now.
+    vehicle_id: Passed as a query param — may not be honoured server-side.
+    """
     now = datetime.now(timezone.utc).replace(microsecond=0)
 
     if to_date:
@@ -350,8 +363,6 @@ async def get_vehicle_drivers(
 
     return wrap_result(await _get("/events", params))
 
-
-# (Other MCP tools unchanged for brevity, can rewrite if you want)
 
 # ============================================================================ #
 # SYSTEM ROUTES
