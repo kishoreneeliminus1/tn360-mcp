@@ -423,6 +423,150 @@ async def get_vehicle_precheck(vehicle_id: int) -> dict:
     return wrap_result(await _get(f"/vehicles/{vehicle_id}/checklist"))
 
 
+# ============================================================================ #
+# FLEET PRE-TRIP CHECKLIST SCAN (single-call, via PRETRIP events)
+# Pulls every pre-trip checklist across the WHOLE fleet in one /events call
+# (types=PRETRIP), instead of one /vehicles/{id}/checklist call per vehicle.
+# ============================================================================ #
+
+PRETRIP_TYPE = "PRETRIP"
+MAX_WINDOW_DAYS = 7          # /events caps a query at 7 days
+PRIME_MOVER_TYPE_CODE = "PM"
+
+
+def _loads(v: Any) -> Any:
+    """Decode the `questions` / `extra` JSON strings defensively."""
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except Exception:
+            return {}
+    return v or {}
+
+
+def _z(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _aest_windows(from_date: str, to_date: str) -> list:
+    """Inclusive AEST calendar dates -> list of <=7-day UTC (from, to) chunks."""
+    start = datetime.fromisoformat(from_date).replace(tzinfo=AUSTRALIA_TZ)
+    end = datetime.fromisoformat(to_date).replace(
+        hour=23, minute=59, second=59, tzinfo=AUSTRALIA_TZ
+    )
+    windows, cur = [], start
+    while cur <= end:
+        chunk_end = min(cur + timedelta(days=MAX_WINDOW_DAYS) - timedelta(seconds=1), end)
+        windows.append((_z(cur), _z(chunk_end)))
+        cur = chunk_end + timedelta(seconds=1)
+    return windows
+
+
+def _summarise_pretrip(e: dict) -> dict:
+    """Flatten one PRETRIP event (checklist fields live under `attributes`)."""
+    a = e.get("attributes", {}) or {}
+    questions = _loads(a.get("questions"))
+    extra = _loads(a.get("extra"))
+
+    odometer, failed_items = None, []
+    if isinstance(questions, list):
+        for q in questions:
+            text = (q.get("Text") or "")
+            if odometer is None and "odometer" in text.lower():
+                odometer = q.get("Answer")
+            if q.get("Result") is False:  # a specific check that failed
+                subs = q.get("SubFailedQuestions") or []
+                failed_items.append({
+                    "item": text.strip(),
+                    "comment": subs[0].get("Answer") if subs else None,
+                })
+
+    return {
+        "vehicle_id": e.get("vehicleId"),
+        "rego": a.get("vehicleRegistrationNo"),
+        "checklist": a.get("checklistName"),
+        "checklist_id": a.get("checklistId"),
+        "passed": a.get("checklistPassed") == "t",
+        "status": a.get("status"),                       # CLOSED / FAULTED
+        "driver": extra.get("closed_by"),
+        "completed_at": a.get("completedAt") or e.get("timeAt"),
+        "location": e.get("location"),
+        "odometer": odometer,
+        "failed_items": failed_items,                    # populated on FAULTED checks
+        "uuid": a.get("uuid"),
+    }
+
+
+async def _prime_mover_ids() -> set:
+    """Enabled Prime Mover vehicle ids, via the same _get."""
+    raw = await _get("/vehicles")
+    rows = raw.get("data", raw) if isinstance(raw, dict) else raw
+    return {
+        v["id"] for v in (rows or [])
+        if v.get("status") == "ENABLED"
+        and (v.get("type") or {}).get("code") == PRIME_MOVER_TYPE_CODE
+    }
+
+
+@mcp.tool()
+async def get_fleet_prechecks(
+    from_date: Optional[str] = None,
+    to_date: Optional[str] = None,
+    prime_movers_only: bool = False,
+    include_gaps: bool = False,
+) -> dict:
+    """
+    Fleet-wide pre-trip checklist scan for an inclusive date range (YYYY-MM-DD, AEST).
+
+    Pulls every PRETRIP submission across the fleet in a single /events call
+    (chunked to 7-day windows for longer ranges) — no per-vehicle fan-out.
+    Defaults to today (AEST) when no dates are given.
+
+    prime_movers_only: keep only Prime Mover submissions (one extra /vehicles call).
+    include_gaps:      also list enabled Prime Movers with NO precheck in-window
+                       (compliance gaps; implies the extra /vehicles call).
+    """
+    today = datetime.now(AUSTRALIA_TZ).date().isoformat()
+    frm, to = from_date or today, to_date or today
+
+    events: list = []
+    for w_from, w_to in _aest_windows(frm, to):
+        params = {"types": PRETRIP_TYPE, "from": w_from, "to": w_to, "pruning": "ALL"}
+        raw = await _get("/events", params)
+        if isinstance(raw, dict) and "error" in raw:
+            return wrap_result(raw)
+        events.extend(raw.get("data", []) if isinstance(raw, dict) else (raw or []))
+
+    pm_ids = set()
+    if prime_movers_only or include_gaps:
+        pm_ids = await _prime_mover_ids()
+
+    subs = [_summarise_pretrip(e) for e in events if (e.get("type") or "").lower() == "pretrip"]
+    if prime_movers_only:
+        subs = [s for s in subs if s["vehicle_id"] in pm_ids]
+
+    faulted = [s for s in subs if s["status"] == "FAULTED" or not s["passed"]]
+    seen_ids = {s["vehicle_id"] for s in subs}
+
+    result = {
+        "window": {"from": frm, "to": to},
+        "summary": {
+            "submissions": len(subs),
+            "vehicles_checked": len(seen_ids),
+            "clean": len(subs) - len(faulted),
+            "faulted_or_failed": len(faulted),
+        },
+        "faulted": faulted,          # broken out for quick action (with failed_items detail)
+        "submissions": subs,         # full flat list for downstream reports
+    }
+    if include_gaps:
+        missing = sorted(pm_ids - seen_ids)
+        result["summary"]["prime_movers_no_precheck"] = len(missing)
+        result["no_precheck_vehicle_ids"] = missing
+
+    return wrap_result(result)
+
+
 @mcp.tool()
 async def get_vehicle_drivers(
     from_date: Optional[str] = None,
